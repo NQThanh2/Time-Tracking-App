@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <color name="attendance_primary">#006C4D</color>
+    <color name="attendance_on_primary">#FFFFFF</color>
+    <color name="attendance_primary_container">#8EF7C8</color>
+    <color name="attendance_on_primary_container">#002115</color>
+    <color name="attendance_secondary">#59645D</color>
+    <color name="attendance_on_secondary">#FFFFFF</color>
+    <color name="attendance_surface">#FBFDF8</color>
+    <color name="attendance_on_surface">#191C1A</color>
+    <color name="attendance_on_surface_variant">#414942</color>
+    <color name="attendance_outline">#717970</color>
+    <color name="attendance_outline_variant">#C1C9BF</color>
+</resources>

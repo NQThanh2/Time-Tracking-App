@@ -1,0 +1,19 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Base.Theme.MyApplication" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/attendance_primary</item>
+        <item name="colorOnPrimary">@color/attendance_on_primary</item>
+        <item name="colorPrimaryContainer">@color/attendance_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/attendance_on_primary_container</item>
+        <item name="colorSecondary">@color/attendance_secondary</item>
+        <item name="colorOnSecondary">@color/attendance_on_secondary</item>
+        <item name="colorSurface">@color/attendance_surface</item>
+        <item name="colorOnSurface">@color/attendance_on_surface</item>
+        <item name="colorOnSurfaceVariant">@color/attendance_on_surface_variant</item>
+        <item name="colorOutline">@color/attendance_outline</item>
+        <item name="colorOutlineVariant">@color/attendance_outline_variant</item>
+        <item name="android:colorAccent">@color/attendance_primary</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>
