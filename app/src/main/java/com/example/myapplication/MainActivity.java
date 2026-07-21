@@ -18,6 +18,7 @@ import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.content.SharedPreferences;
 
 import androidx.activity.EdgeToEdge;
 import androidx.appcompat.app.AlertDialog;
@@ -51,6 +52,10 @@ public class MainActivity extends AppCompatActivity {
     private static final DateTimeFormatter STORAGE_TIME_FORMAT =
             DateTimeFormatter.ISO_LOCAL_DATE_TIME;
 
+    private static final String PREFS_NAME = "AttendancePrefs";
+    private static final String KEY_HOURLY_WAGE = "hourly_wage";
+    private static final int PARKING_FEE_PER_TIME = 5000;
+
     private AttendanceStore attendanceStore;
     private TextView biometricStatusText;
     private TextView todayDateText;
@@ -64,8 +69,18 @@ public class MainActivity extends AppCompatActivity {
     private Button checkInButton;
     private Button checkOutButton;
     private Button catchUpButton;
+    private Button parkingButton;
+    private Button parkingAddButton;
+    private Button parkingMinusButton;
     private Button previousMonthButton;
     private Button nextMonthButton;
+    private Button viewCalendarButton; // Nút lịch
+
+    private com.google.android.material.textfield.TextInputEditText hourlyWageInput;
+    private TextView monthlySalaryText;
+    private TextView parkingFeeText;
+    private long currentMonthTotalMinutes = 0;
+
     private YearMonth visibleMonth = YearMonth.now();
     private boolean biometricReady;
     private boolean promptShowing;
@@ -84,9 +99,42 @@ public class MainActivity extends AppCompatActivity {
 
         attendanceStore = new AttendanceStore(this);
         bindViews();
+
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String savedWage = prefs.getString(KEY_HOURLY_WAGE, "");
+        if (!savedWage.isEmpty()) {
+            hourlyWageInput.setText(savedWage);
+        }
+
+        hourlyWageInput.addTextChangedListener(new android.text.TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {}
+
+            @Override
+            public void afterTextChanged(android.text.Editable s) {
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putString(KEY_HOURLY_WAGE, s.toString())
+                        .apply();
+
+                calculateAndDisplaySalary();
+            }
+        });
+
         checkInButton.setOnClickListener(v -> authenticateAndRecord(PunchAction.IN));
         checkOutButton.setOnClickListener(v -> authenticateAndRecord(PunchAction.OUT));
         catchUpButton.setOnClickListener(v -> showCatchUpDialog());
+
+        parkingButton.setOnClickListener(v -> recordParking());
+        parkingAddButton.setOnClickListener(v -> recordParking());
+        parkingMinusButton.setOnClickListener(v -> undoParking());
+
+        // Bắt sự kiện bấm vào nút xem lịch
+        viewCalendarButton.setOnClickListener(v -> showCalendarDialog());
+
         previousMonthButton.setOnClickListener(v -> {
             visibleMonth = visibleMonth.minusMonths(1);
             renderDashboard();
@@ -116,8 +164,226 @@ public class MainActivity extends AppCompatActivity {
         checkInButton = findViewById(R.id.checkInButton);
         checkOutButton = findViewById(R.id.checkOutButton);
         catchUpButton = findViewById(R.id.catchUpButton);
+        parkingButton = findViewById(R.id.parkingButton);
+        parkingAddButton = findViewById(R.id.parkingAddButton);
+        parkingMinusButton = findViewById(R.id.parkingMinusButton);
         previousMonthButton = findViewById(R.id.previousMonthButton);
         nextMonthButton = findViewById(R.id.nextMonthButton);
+        viewCalendarButton = findViewById(R.id.viewCalendarButton); // Ánh xạ nút lịch
+
+        hourlyWageInput = findViewById(R.id.hourlyWageInput);
+        monthlySalaryText = findViewById(R.id.monthlySalaryText);
+        parkingFeeText = findViewById(R.id.parkingFeeText);
+    }
+
+    // MỚI: Các hàm để tạo và hiển thị Bảng Lịch (Heatmap Calendar)
+    private void showCalendarDialog() {
+        Map<LocalDate, DailySummary> summaries = attendanceStore.getSummariesForMonth(visibleMonth);
+        LocalDate firstDay = visibleMonth.atDay(1);
+
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        int padding = dp(24);
+        container.setPadding(padding, padding, padding, padding);
+
+        // Tạo hàng tiêu đề các thứ trong tuần
+        LinearLayout headerRow = new LinearLayout(this);
+        headerRow.setOrientation(LinearLayout.HORIZONTAL);
+        String[] daysOfWeek = {"T2", "T3", "T4", "T5", "T6", "T7", "CN"};
+        for (String dow : daysOfWeek) {
+            TextView tv = new TextView(this);
+            tv.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            tv.setGravity(Gravity.CENTER);
+            tv.setText(dow);
+            tv.setTextSize(13);
+            tv.setTypeface(null, android.graphics.Typeface.BOLD);
+            tv.setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant, android.R.color.darker_gray));
+            headerRow.addView(tv);
+        }
+        container.addView(headerRow);
+
+        // Vẽ lưới lịch
+        int startDow = firstDay.getDayOfWeek().getValue(); // 1 = T2, 7 = CN
+        int daysInMonth = visibleMonth.lengthOfMonth();
+
+        LinearLayout currentRow = new LinearLayout(this);
+        currentRow.setOrientation(LinearLayout.HORIZONTAL);
+        currentRow.setPadding(0, dp(8), 0, 0);
+
+        // Chèn các ô trống vào đầu tháng (nếu mùng 1 không phải T2)
+        for (int i = 1; i < startDow; i++) {
+            currentRow.addView(createCalendarCell(null, 0));
+        }
+
+        // Duyệt từng ngày trong tháng
+        for (int day = 1; day <= daysInMonth; day++) {
+            LocalDate date = visibleMonth.atDay(day);
+            DailySummary summary = summaries.get(date);
+            long minutes = summary != null ? summary.workedMinutes : 0;
+
+            currentRow.addView(createCalendarCell(String.valueOf(day), minutes));
+
+            // Hết 1 tuần (chủ nhật) hoặc là ngày cuối cùng của tháng -> Chuyển sang hàng mới
+            if (date.getDayOfWeek().getValue() == 7 || day == daysInMonth) {
+                // Nếu là ngày cuối tháng, thêm các ô trống để đủ 7 cột
+                if (day == daysInMonth) {
+                    int endDow = date.getDayOfWeek().getValue();
+                    for (int i = endDow; i < 7; i++) {
+                        currentRow.addView(createCalendarCell(null, 0));
+                    }
+                }
+                container.addView(currentRow);
+                currentRow = new LinearLayout(this);
+                currentRow.setOrientation(LinearLayout.HORIZONTAL);
+                currentRow.setPadding(0, dp(8), 0, 0);
+            }
+        }
+
+        // Thêm chú thích màu sắc
+        container.addView(createLegendView());
+
+        new AlertDialog.Builder(this)
+                .setTitle("Lịch làm việc - Tháng " + MONTH_FORMAT.format(firstDay))
+                .setView(container)
+                .setPositiveButton("Đóng", null)
+                .show();
+    }
+
+    private View createCalendarCell(String text, long workedMinutes) {
+        TextView tv = new TextView(this);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(40), 1);
+        params.setMargins(dp(2), dp(2), dp(2), dp(2));
+        tv.setLayoutParams(params);
+        tv.setGravity(Gravity.CENTER);
+
+        if (text == null) {
+            tv.setBackgroundColor(android.graphics.Color.TRANSPARENT);
+            return tv;
+        }
+
+        tv.setText(text);
+        tv.setTextSize(14);
+        tv.setTypeface(null, android.graphics.Typeface.BOLD);
+
+        // Logic chia màu (Heatmap)
+        int bgColor;
+        int textColor = android.graphics.Color.BLACK;
+
+        if (workedMinutes == 0) {
+            bgColor = android.graphics.Color.parseColor("#20888888"); // Xám nhạt (trong suốt 20%)
+            textColor = resolveThemeColor(com.google.android.material.R.attr.colorOnSurface, android.R.color.black);
+        } else if (workedMinutes <= 4 * 60) {
+            bgColor = android.graphics.Color.parseColor("#90CAF9"); // Xanh dương nhạt (Làm ít)
+        } else if (workedMinutes <= 8 * 60) {
+            bgColor = android.graphics.Color.parseColor("#42A5F5"); // Xanh dương vừa (Làm chuẩn)
+        } else {
+            bgColor = android.graphics.Color.parseColor("#1565C0"); // Xanh dương đậm (Làm nhiều / Tăng ca)
+            textColor = android.graphics.Color.WHITE;
+        }
+
+        android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
+        gd.setColor(bgColor);
+        gd.setCornerRadius(dp(8));
+        tv.setBackground(gd);
+        tv.setTextColor(textColor);
+
+        return tv;
+    }
+
+    private View createLegendView() {
+        LinearLayout legend = new LinearLayout(this);
+        legend.setOrientation(LinearLayout.HORIZONTAL);
+        legend.setGravity(Gravity.CENTER);
+        legend.setPadding(0, dp(24), 0, 0);
+
+        legend.addView(createLegendItem("#20888888", "Nghỉ"));
+        legend.addView(createLegendItem("#90CAF9", "<4h"));
+        legend.addView(createLegendItem("#42A5F5", "4-8h"));
+        legend.addView(createLegendItem("#1565C0", ">8h"));
+
+        return legend;
+    }
+
+    private View createLegendItem(String colorHex, String label) {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.HORIZONTAL);
+        item.setGravity(Gravity.CENTER_VERTICAL);
+        item.setPadding(dp(4), 0, dp(8), 0);
+
+        View colorBox = new View(this);
+        colorBox.setLayoutParams(new LinearLayout.LayoutParams(dp(12), dp(12)));
+        android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
+        gd.setColor(android.graphics.Color.parseColor(colorHex));
+        gd.setCornerRadius(dp(2));
+        colorBox.setBackground(gd);
+
+        TextView tv = new TextView(this);
+        tv.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        tv.setText(label);
+        tv.setTextSize(11);
+        tv.setPadding(dp(4), 0, 0, 0);
+        tv.setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant, android.graphics.Color.GRAY));
+
+        item.addView(colorBox);
+        item.addView(tv);
+        return item;
+    }
+    // HẾT PHẦN LỊCH MỚI
+
+    private String getMonthKey(YearMonth month) {
+        return "parking_count_" + month.getYear() + "_" + month.getMonthValue();
+    }
+
+    private void recordParking() {
+        String monthKey = getMonthKey(visibleMonth);
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        int currentCount = prefs.getInt(monthKey, 0);
+        prefs.edit().putInt(monthKey, currentCount + 1).apply();
+
+        Toast.makeText(this, "Đã cộng thêm 5.000đ tiền gửi xe", Toast.LENGTH_SHORT).show();
+        updateParkingFeeDisplay();
+    }
+
+    private void undoParking() {
+        String monthKey = getMonthKey(visibleMonth);
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        int currentCount = prefs.getInt(monthKey, 0);
+        if (currentCount > 0) {
+            prefs.edit().putInt(monthKey, currentCount - 1).apply();
+            Toast.makeText(this, "Đã xóa 1 lần gửi xe", Toast.LENGTH_SHORT).show();
+            updateParkingFeeDisplay();
+        } else {
+            Toast.makeText(this, "Chưa có lượt gửi xe nào trong tháng này để xóa", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void updateParkingFeeDisplay() {
+        String monthKey = getMonthKey(visibleMonth);
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        int count = prefs.getInt(monthKey, 0);
+        long totalParkingFee = (long) count * PARKING_FEE_PER_TIME;
+
+        java.text.NumberFormat formatter = java.text.NumberFormat.getCurrencyInstance(new java.util.Locale("vi", "VN"));
+        parkingFeeText.setText("Gửi xe: " + formatter.format(totalParkingFee) + " (" + count + " lần)");
+    }
+
+    private void calculateAndDisplaySalary() {
+        String wageStr = hourlyWageInput.getText() != null ? hourlyWageInput.getText().toString() : "";
+        double hourlyWage = 0;
+
+        if (!wageStr.isEmpty()) {
+            try {
+                hourlyWage = Double.parseDouble(wageStr);
+            } catch (NumberFormatException e) {
+                hourlyWage = 0;
+            }
+        }
+
+        double hours = currentMonthTotalMinutes / 60.0;
+        double totalSalary = hours * hourlyWage;
+
+        java.text.NumberFormat formatter = java.text.NumberFormat.getCurrencyInstance(new java.util.Locale("vi", "VN"));
+        monthlySalaryText.setText(formatter.format(totalSalary));
     }
 
     private void updateBiometricStatus() {
@@ -414,6 +680,10 @@ public class MainActivity extends AppCompatActivity {
         checkInButton.setEnabled(!promptShowing && biometricReady && todaySummary.firstIn == null);
         checkOutButton.setEnabled(!promptShowing && biometricReady && todaySummary.firstIn != null && todaySummary.lastOut == null);
         catchUpButton.setEnabled(!promptShowing && biometricReady);
+        parkingButton.setEnabled(!promptShowing);
+        parkingAddButton.setEnabled(!promptShowing);
+        parkingMinusButton.setEnabled(!promptShowing);
+        viewCalendarButton.setEnabled(!promptShowing);
         previousMonthButton.setEnabled(!promptShowing);
         nextMonthButton.setEnabled(!promptShowing && visibleMonth.isBefore(currentMonth));
 
@@ -426,7 +696,12 @@ public class MainActivity extends AppCompatActivity {
         LocalDate lastVisibleDay = month.equals(YearMonth.from(today)) ? today : month.atEndOfMonth();
 
         monthTitleText.setText("Tổng hợp tháng " + MONTH_FORMAT.format(month.atDay(1)));
-        monthTotalText.setText("Tổng tháng: " + formatDuration(calculateMonthTotalMinutes(summaries)));
+
+        currentMonthTotalMinutes = calculateMonthTotalMinutes(summaries);
+        monthTotalText.setText("Tổng tháng: " + formatDuration(currentMonthTotalMinutes));
+        calculateAndDisplaySalary();
+        updateParkingFeeDisplay();
+
         monthlySummaryContainer.removeAllViews();
 
         if (summaries.isEmpty()) {

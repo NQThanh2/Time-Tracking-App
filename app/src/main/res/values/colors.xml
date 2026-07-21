@@ -14,4 +14,5 @@
     <color name="attendance_on_surface_variant">#414942</color>
     <color name="attendance_outline">#717970</color>
     <color name="attendance_outline_variant">#C1C9BF</color>
+    <color name="attendance_surface_container">#EDF3EC</color>
 </resources>
