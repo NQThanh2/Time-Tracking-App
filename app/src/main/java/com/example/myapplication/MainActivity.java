@@ -1,32 +1,65 @@
 package com.example.myapplication;
 
+import android.Manifest;
+import android.annotation.SuppressLint;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.app.DatePickerDialog;
 import android.app.TimePickerDialog;
+import android.content.res.ColorStateList;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Rect;
+import android.graphics.RenderEffect;
+import android.graphics.Shader;
 import android.hardware.biometrics.BiometricManager;
 import android.hardware.biometrics.BiometricPrompt;
+import android.net.Uri;
+import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.content.SharedPreferences;
 
 import androidx.activity.EdgeToEdge;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.core.widget.NestedScrollView;
 
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.card.MaterialCardView;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.textfield.TextInputEditText;
+import com.google.android.material.textfield.TextInputLayout;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.text.Text;
+import com.google.mlkit.vision.text.TextRecognition;
+import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -47,6 +80,8 @@ public class MainActivity extends AppCompatActivity {
             DateTimeFormatter.ofPattern("MM/yyyy", VIETNAM);
     private static final DateTimeFormatter DAY_FORMAT =
             DateTimeFormatter.ofPattern("dd/MM", VIETNAM);
+    private static final DateTimeFormatter SUMMARY_DAY_FORMAT =
+            DateTimeFormatter.ofPattern("EEE, dd/MM", VIETNAM);
     private static final DateTimeFormatter TIME_FORMAT =
             DateTimeFormatter.ofPattern("HH:mm", VIETNAM);
     private static final DateTimeFormatter STORAGE_TIME_FORMAT =
@@ -54,7 +89,11 @@ public class MainActivity extends AppCompatActivity {
 
     private static final String PREFS_NAME = "AttendancePrefs";
     private static final String KEY_HOURLY_WAGE = "hourly_wage";
+    private static final String KEY_BACKGROUND_URI = "background_image_uri";
     private static final int PARKING_FEE_PER_TIME = 5000;
+    private static final float DIALOG_DIM_AMOUNT = 0.22f;
+    private static final float BACKGROUND_BLUR_RADIUS_DP = 18f;
+    private static final int[] SCHEDULE_OCR_ROTATIONS = {0, 270, 90, 180};
 
     private AttendanceStore attendanceStore;
     private TextView biometricStatusText;
@@ -66,6 +105,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView monthTotalText;
     private TextView emptySummaryText;
     private LinearLayout monthlySummaryContainer;
+    private NestedScrollView daySummaryScroll;
     private Button checkInButton;
     private Button checkOutButton;
     private Button catchUpButton;
@@ -75,6 +115,11 @@ public class MainActivity extends AppCompatActivity {
     private Button previousMonthButton;
     private Button nextMonthButton;
     private Button viewCalendarButton; // Nút lịch
+    private Button backgroundButton;
+    private ImageView backgroundImageView;
+    private View backgroundScrim;
+    private TextView scheduleStatusText;
+    private Button importScheduleButton;
 
     private com.google.android.material.textfield.TextInputEditText hourlyWageInput;
     private TextView monthlySalaryText;
@@ -84,6 +129,21 @@ public class MainActivity extends AppCompatActivity {
     private YearMonth visibleMonth = YearMonth.now();
     private boolean biometricReady;
     private boolean promptShowing;
+    private float summaryTouchDownX;
+    private float summaryTouchDownY;
+    private String pendingScheduleName = "";
+    private TextRecognizer scheduleTextRecognizer;
+    private boolean scheduleImportInProgress;
+
+    private final ActivityResultLauncher<String[]> backgroundImagePicker =
+            registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onBackgroundImageSelected);
+    private final ActivityResultLauncher<String[]> scheduleImagePicker =
+            registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onScheduleImageSelected);
+    private final ActivityResultLauncher<String> notificationPermissionLauncher =
+            registerForActivityResult(
+                    new ActivityResultContracts.RequestPermission(),
+                    ignored -> promptForExactAlarmPermission()
+            );
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -98,7 +158,11 @@ public class MainActivity extends AppCompatActivity {
         });
 
         attendanceStore = new AttendanceStore(this);
+        scheduleTextRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         bindViews();
+        restoreBackgroundImage();
+        updateScheduleStatus();
+        confineDaySummaryScrolling();
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         String savedWage = prefs.getString(KEY_HOURLY_WAGE, "");
@@ -134,6 +198,8 @@ public class MainActivity extends AppCompatActivity {
 
         // Bắt sự kiện bấm vào nút xem lịch
         viewCalendarButton.setOnClickListener(v -> showCalendarDialog());
+        backgroundButton.setOnClickListener(v -> showBackgroundOptions());
+        importScheduleButton.setOnClickListener(v -> showScheduleImportDialog());
 
         previousMonthButton.setOnClickListener(v -> {
             visibleMonth = visibleMonth.minusMonths(1);
@@ -159,8 +225,9 @@ public class MainActivity extends AppCompatActivity {
         totalTodayValueText = findViewById(R.id.totalTodayValueText);
         monthTitleText = findViewById(R.id.monthTitleText);
         monthTotalText = findViewById(R.id.monthTotalText);
-        emptySummaryText = findViewById(R.id.emptySummaryText);
         monthlySummaryContainer = findViewById(R.id.monthlySummaryContainer);
+        emptySummaryText = createEmptySummaryView();
+        daySummaryScroll = findViewById(R.id.daySummaryScroll);
         checkInButton = findViewById(R.id.checkInButton);
         checkOutButton = findViewById(R.id.checkOutButton);
         catchUpButton = findViewById(R.id.catchUpButton);
@@ -170,23 +237,736 @@ public class MainActivity extends AppCompatActivity {
         previousMonthButton = findViewById(R.id.previousMonthButton);
         nextMonthButton = findViewById(R.id.nextMonthButton);
         viewCalendarButton = findViewById(R.id.viewCalendarButton); // Ánh xạ nút lịch
+        backgroundButton = findViewById(R.id.backgroundButton);
+        backgroundImageView = findViewById(R.id.backgroundImageView);
+        backgroundScrim = findViewById(R.id.backgroundScrim);
 
         hourlyWageInput = findViewById(R.id.hourlyWageInput);
         monthlySalaryText = findViewById(R.id.monthlySalaryText);
         parkingFeeText = findViewById(R.id.parkingFeeText);
+        scheduleStatusText = findViewById(R.id.scheduleStatusText);
+        importScheduleButton = findViewById(R.id.importScheduleButton);
     }
 
-    // MỚI: Các hàm để tạo và hiển thị Bảng Lịch (Heatmap Calendar)
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (scheduleStatusText != null) {
+            WorkScheduleManager.reschedule(this);
+            if (scheduleImportInProgress) {
+                scheduleStatusText.setText("Đang đọc ảnh và tìm tên " + pendingScheduleName + "…");
+            } else {
+                updateScheduleStatus();
+            }
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (scheduleTextRecognizer != null) {
+            scheduleTextRecognizer.close();
+        }
+        super.onDestroy();
+    }
+
+    private void showScheduleImportDialog() {
+        List<WorkShift> savedShifts = WorkScheduleManager.loadShifts(this);
+        if (savedShifts.isEmpty()) {
+            AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                    .setTitle("Nhập lịch làm")
+                    .setItems(new String[]{
+                            "Đọc lịch từ ảnh",
+                            "Thêm ca làm thủ công"
+                    }, (ignored, which) -> {
+                        if (which == 0) {
+                            showScheduleImageImportDialog();
+                        } else {
+                            showManualScheduleNameDialog();
+                        }
+                    })
+                    .setNegativeButton("Đóng", null)
+                    .create();
+            showDialogWithBlur(dialog);
+            return;
+        }
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Lịch làm cá nhân")
+                .setItems(new String[]{
+                        "Xem và chỉnh sửa " + savedShifts.size() + " ca đã lưu",
+                        "Thêm ca làm còn thiếu",
+                        "Đọc lại lịch từ ảnh"
+                }, (ignored, which) -> {
+                    String employeeName = WorkScheduleManager.getEmployeeName(this);
+                    List<WorkShift> editableShifts = new ArrayList<>(savedShifts);
+                    if (which == 0) {
+                        showScheduleEditor(employeeName, editableShifts, false);
+                    } else if (which == 1) {
+                        showScheduleShiftEditor(employeeName, editableShifts, -1, false);
+                    } else {
+                        showScheduleImageImportDialog();
+                    }
+                })
+                .setNegativeButton("Đóng", null)
+                .create();
+        showDialogWithBlur(dialog);
+    }
+
+    private void showScheduleImageImportDialog() {
+        TextInputLayout nameInputLayout = new TextInputLayout(this);
+        nameInputLayout.setHint("Họ và tên của bạn");
+        nameInputLayout.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_OUTLINE);
+
+        TextInputEditText nameInput = new TextInputEditText(nameInputLayout.getContext());
+        nameInput.setSingleLine(true);
+        nameInput.setText(pendingScheduleName.isEmpty()
+                ? WorkScheduleManager.getEmployeeName(this)
+                : pendingScheduleName);
+        nameInputLayout.addView(nameInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView helpText = new TextView(this);
+        helpText.setText("Chọn ảnh có đầy đủ tên và các cột ngày. Ứng dụng sẽ tìm đúng dòng tên này; hai số trong mỗi ngày được hiểu là giờ vào và giờ ra.");
+        helpText.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurfaceVariant,
+                android.R.color.darker_gray
+        ));
+        helpText.setTextSize(13);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        int horizontalPadding = dp(20);
+        content.setPadding(horizontalPadding, dp(8), horizontalPadding, 0);
+        content.addView(nameInputLayout);
+        LinearLayout.LayoutParams helpParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        helpParams.topMargin = dp(12);
+        content.addView(helpText, helpParams);
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Lọc lịch theo tên")
+                .setView(content)
+                .setNegativeButton("Hủy", null)
+                .setPositiveButton("Chọn ảnh", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String name = nameInput.getText() == null
+                            ? ""
+                            : nameInput.getText().toString().trim();
+                    if (name.isEmpty()) {
+                        nameInputLayout.setError("Hãy nhập họ và tên của bạn");
+                        return;
+                    }
+                    nameInputLayout.setError(null);
+                    pendingScheduleName = name;
+                    dialog.dismiss();
+                    scheduleImagePicker.launch(new String[]{"image/*"});
+                }));
+        showDialogWithBlur(dialog);
+    }
+
+    private void onScheduleImageSelected(Uri uri) {
+        if (uri == null || pendingScheduleName.isEmpty()) {
+            return;
+        }
+
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+            );
+        } catch (SecurityException ignored) {
+            // The selected document can still be read for this import session.
+        }
+
+        setScheduleImportBusy(true);
+        new Thread(() -> {
+            try {
+                Bitmap bitmap = decodeScheduleBitmap(uri);
+                runOnUiThread(() -> recognizeScheduleAtRotation(bitmap, 0, null));
+            } catch (IOException | RuntimeException exception) {
+                runOnUiThread(() -> finishScheduleImportWithError(
+                        "Không mở được ảnh đã chọn. Hãy thử chọn lại ảnh rõ hơn."
+                ));
+            }
+        }, "schedule-image-loader").start();
+    }
+
+    private Bitmap decodeScheduleBitmap(Uri uri) throws IOException {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        try (InputStream stream = getContentResolver().openInputStream(uri)) {
+            if (stream == null) {
+                throw new IOException("Image stream is unavailable");
+            }
+            BitmapFactory.decodeStream(stream, null, bounds);
+        }
+
+        int longestEdge = Math.max(bounds.outWidth, bounds.outHeight);
+        int sampleSize = 1;
+        while (longestEdge / sampleSize > 3000) {
+            sampleSize *= 2;
+        }
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = sampleSize;
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        try (InputStream stream = getContentResolver().openInputStream(uri)) {
+            if (stream == null) {
+                throw new IOException("Image stream is unavailable");
+            }
+            Bitmap decoded = BitmapFactory.decodeStream(stream, null, options);
+            if (decoded == null) {
+                throw new IOException("Image could not be decoded");
+            }
+            int decodedLongestEdge = Math.max(decoded.getWidth(), decoded.getHeight());
+            if (decodedLongestEdge >= 2400) {
+                return decoded;
+            }
+            float scale = Math.min(2.2f, 2800f / decodedLongestEdge);
+            Bitmap enlarged = Bitmap.createScaledBitmap(
+                    decoded,
+                    Math.round(decoded.getWidth() * scale),
+                    Math.round(decoded.getHeight() * scale),
+                    true
+            );
+            if (enlarged != decoded) {
+                decoded.recycle();
+            }
+            return enlarged;
+        }
+    }
+
+    private void recognizeScheduleAtRotation(Bitmap bitmap, int attempt, String bestError) {
+        if (attempt >= SCHEDULE_OCR_ROTATIONS.length) {
+            bitmap.recycle();
+            finishScheduleImportWithError(bestError == null
+                    ? "Không đọc được lịch trong ảnh."
+                    : bestError);
+            return;
+        }
+
+        InputImage image = InputImage.fromBitmap(bitmap, SCHEDULE_OCR_ROTATIONS[attempt]);
+        scheduleTextRecognizer.process(image)
+                .addOnSuccessListener(text -> {
+                    List<ScheduleOcrParser.Token> scheduleTokens = createScheduleTokens(text);
+                    ScheduleOcrParser.Result result = ScheduleOcrParser.parse(
+                            scheduleTokens,
+                            pendingScheduleName,
+                            LocalDate.now()
+                    );
+                    if (result.success) {
+                        bitmap.recycle();
+                        setScheduleImportBusy(false);
+                        showSchedulePreview(result);
+                    } else {
+                        recognizeScheduleAtRotation(bitmap, attempt + 1, result.errorMessage);
+                    }
+                })
+                .addOnFailureListener(error -> recognizeScheduleAtRotation(
+                        bitmap,
+                        attempt + 1,
+                        bestError
+                ));
+    }
+
+    private List<ScheduleOcrParser.Token> createScheduleTokens(Text text) {
+        List<ScheduleOcrParser.Token> tokens = new ArrayList<>();
+        for (Text.TextBlock block : text.getTextBlocks()) {
+            for (Text.Line line : block.getLines()) {
+                for (Text.Element element : line.getElements()) {
+                    Rect bounds = element.getBoundingBox();
+                    if (bounds != null && !element.getText().trim().isEmpty()) {
+                        tokens.add(new ScheduleOcrParser.Token(
+                                element.getText(),
+                                bounds.left,
+                                bounds.top,
+                                bounds.right,
+                                bounds.bottom
+                        ));
+                    }
+                }
+            }
+        }
+        return tokens;
+    }
+
+    private void showSchedulePreview(ScheduleOcrParser.Result result) {
+        showScheduleEditor(
+                result.employeeName,
+                new ArrayList<>(result.shifts),
+                true
+        );
+    }
+
+    private void showManualScheduleNameDialog() {
+        TextInputLayout nameInputLayout = new TextInputLayout(this);
+        nameInputLayout.setHint("Họ và tên của bạn");
+        nameInputLayout.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_OUTLINE);
+
+        TextInputEditText nameInput = new TextInputEditText(nameInputLayout.getContext());
+        nameInput.setSingleLine(true);
+        nameInput.setText(pendingScheduleName);
+        nameInputLayout.addView(nameInput, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout content = new LinearLayout(this);
+        content.setPadding(dp(20), dp(8), dp(20), 0);
+        content.addView(nameInputLayout);
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Thêm lịch thủ công")
+                .setView(content)
+                .setNegativeButton("Hủy", null)
+                .setPositiveButton("Tiếp tục", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    String name = nameInput.getText() == null
+                            ? ""
+                            : nameInput.getText().toString().trim();
+                    if (name.isEmpty()) {
+                        nameInputLayout.setError("Hãy nhập họ và tên của bạn");
+                        return;
+                    }
+                    pendingScheduleName = name;
+                    dialog.dismiss();
+                    showScheduleShiftEditor(name, new ArrayList<>(), -1, false);
+                }));
+        showDialogWithBlur(dialog);
+    }
+
+    private void showScheduleEditor(
+            String employeeName,
+            List<WorkShift> editableShifts,
+            boolean importedFromImage
+    ) {
+        sortScheduleShifts(editableShifts);
+        String[] shiftLabels = new String[editableShifts.size()];
+        DateTimeFormatter dateFormat = DateTimeFormatter.ofPattern("EEE, dd/MM/yyyy", VIETNAM);
+        for (int index = 0; index < editableShifts.size(); index++) {
+            WorkShift shift = editableShifts.get(index);
+            shiftLabels[index] = capitalize(dateFormat.format(shift.date))
+                    + "  •  " + TIME_FORMAT.format(shift.start)
+                    + " – " + TIME_FORMAT.format(shift.end)
+                    + "\nChạm để sửa hoặc xóa";
+        }
+
+        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this)
+                .setTitle((importedFromImage ? "Kiểm tra lịch của " : "Sửa lịch của ") + employeeName)
+                .setNegativeButton(
+                        importedFromImage ? "Chọn ảnh khác" : "Đóng",
+                        (ignored, which) -> {
+                            if (importedFromImage) {
+                                scheduleImagePicker.launch(new String[]{"image/*"});
+                            }
+                        }
+                )
+                .setNeutralButton("Thêm ca", null)
+                .setPositiveButton("Lưu lịch", (ignored, which) -> {
+                    WorkScheduleManager.saveSchedule(this, employeeName, editableShifts);
+                    pendingScheduleName = employeeName;
+                    updateScheduleStatus();
+                    requestScheduleReminderPermissions();
+                    Toast.makeText(
+                            this,
+                            "Đã lưu " + editableShifts.size() + " ca của " + employeeName,
+                            Toast.LENGTH_LONG
+                    ).show();
+                });
+        if (shiftLabels.length == 0) {
+            builder.setMessage("Chưa có ca làm. Bấm “Thêm ca” để bổ sung ngày làm còn thiếu.");
+        } else {
+            builder.setItems(shiftLabels, (ignored, which) -> showScheduleShiftEditor(
+                    employeeName,
+                    editableShifts,
+                    which,
+                    importedFromImage
+            ));
+        }
+
+        AlertDialog dialog = builder.create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
+                .setOnClickListener(v -> {
+                    dialog.dismiss();
+                    showScheduleShiftEditor(employeeName, editableShifts, -1, importedFromImage);
+                }));
+        showDialogWithBlur(dialog);
+    }
+
+    private void showScheduleShiftEditor(
+            String employeeName,
+            List<WorkShift> editableShifts,
+            int shiftIndex,
+            boolean importedFromImage
+    ) {
+        boolean editing = shiftIndex >= 0 && shiftIndex < editableShifts.size();
+        WorkShift existing = editing ? editableShifts.get(shiftIndex) : null;
+        ScheduleShiftDraft draft = new ScheduleShiftDraft(
+                existing == null ? suggestedScheduleDate(editableShifts) : existing.date,
+                existing == null ? LocalTime.of(8, 0) : existing.start,
+                existing == null ? LocalTime.of(17, 0) : existing.end
+        );
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(6), dp(4), dp(6), dp(2));
+
+        Button dateButton = createDialogChoiceButton(formatCatchUpDate(draft.date));
+        Button startButton = createDialogChoiceButton(formatTime(draft.start));
+        Button endButton = createDialogChoiceButton(formatTime(draft.end));
+        form.addView(createDialogRow("Ngày làm", dateButton));
+        form.addView(createDialogRow("Giờ vào", startButton));
+        form.addView(createDialogRow("Giờ ra", endButton));
+
+        dateButton.setOnClickListener(v -> showScheduleDatePicker(draft, dateButton));
+        startButton.setOnClickListener(v -> showCatchUpTimePicker(
+                "Giờ vào",
+                draft.start,
+                selectedTime -> {
+                    draft.start = selectedTime;
+                    startButton.setText(formatTime(draft.start));
+                }
+        ));
+        endButton.setOnClickListener(v -> showCatchUpTimePicker(
+                "Giờ ra",
+                draft.end,
+                selectedTime -> {
+                    draft.end = selectedTime;
+                    endButton.setText(formatTime(draft.end));
+                }
+        ));
+
+        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this)
+                .setTitle(editing ? "Sửa ca làm" : "Thêm ca làm")
+                .setView(form)
+                .setNegativeButton("Quay lại", (ignored, which) ->
+                        showScheduleEditor(employeeName, editableShifts, importedFromImage))
+                .setPositiveButton("Lưu ca", null);
+        if (editing) {
+            builder.setNeutralButton("Xóa ca", (ignored, which) -> {
+                editableShifts.remove(shiftIndex);
+                showScheduleEditor(employeeName, editableShifts, importedFromImage);
+            });
+        }
+
+        AlertDialog dialog = builder.create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    if (!draft.end.isAfter(draft.start)) {
+                        Toast.makeText(this, "Giờ ra phải sau giờ vào.", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    for (int index = 0; index < editableShifts.size(); index++) {
+                        if (index != shiftIndex && editableShifts.get(index).date.equals(draft.date)) {
+                            Toast.makeText(
+                                    this,
+                                    "Ngày này đã có ca làm. Hãy sửa ca đã có.",
+                                    Toast.LENGTH_SHORT
+                            ).show();
+                            return;
+                        }
+                    }
+
+                    WorkShift updated = new WorkShift(
+                            draft.date,
+                            normalizeTime(draft.start),
+                            normalizeTime(draft.end)
+                    );
+                    if (editing) {
+                        editableShifts.set(shiftIndex, updated);
+                    } else {
+                        editableShifts.add(updated);
+                    }
+                    sortScheduleShifts(editableShifts);
+                    dialog.dismiss();
+                    showScheduleEditor(employeeName, editableShifts, importedFromImage);
+                }));
+        showDialogWithBlur(dialog);
+    }
+
+    private void showScheduleDatePicker(ScheduleShiftDraft draft, Button dateButton) {
+        DatePickerDialog picker = new DatePickerDialog(
+                this,
+                (view, year, month, dayOfMonth) -> {
+                    draft.date = LocalDate.of(year, month + 1, dayOfMonth);
+                    dateButton.setText(formatCatchUpDate(draft.date));
+                },
+                draft.date.getYear(),
+                draft.date.getMonthValue() - 1,
+                draft.date.getDayOfMonth()
+        );
+        picker.show();
+    }
+
+    private LocalDate suggestedScheduleDate(List<WorkShift> shifts) {
+        if (shifts.isEmpty()) {
+            return LocalDate.now();
+        }
+        LocalDate latest = shifts.get(0).date;
+        for (WorkShift shift : shifts) {
+            if (shift.date.isAfter(latest)) {
+                latest = shift.date;
+            }
+        }
+        return latest.plusDays(1);
+    }
+
+    private void sortScheduleShifts(List<WorkShift> shifts) {
+        shifts.sort((first, second) -> {
+            int dateComparison = first.date.compareTo(second.date);
+            return dateComparison != 0 ? dateComparison : first.start.compareTo(second.start);
+        });
+    }
+
+    private void finishScheduleImportWithError(String message) {
+        setScheduleImportBusy(false);
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Chưa lọc được lịch")
+                .setMessage(message + "\n\nHãy dùng ảnh rõ, không cắt mất tên hoặc hàng ngày tháng, rồi kiểm tra tên đã nhập đúng như trong ảnh.")
+                .setNegativeButton("Đóng", null)
+                .setPositiveButton("Thử lại", (ignored, which) -> showScheduleImageImportDialog())
+                .create();
+        showDialogWithBlur(dialog);
+    }
+
+    private void setScheduleImportBusy(boolean busy) {
+        scheduleImportInProgress = busy;
+        if (scheduleStatusText != null) {
+            if (busy) {
+                scheduleStatusText.setText("Đang đọc ảnh và tìm tên " + pendingScheduleName + "…");
+            } else {
+                updateScheduleStatus();
+            }
+        }
+        if (importScheduleButton != null) {
+            importScheduleButton.setEnabled(!busy && !promptShowing);
+        }
+    }
+
+    private void updateScheduleStatus() {
+        scheduleStatusText.setText(WorkScheduleManager.getStatusText(this));
+    }
+
+    private void requestScheduleReminderPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+            return;
+        }
+        promptForExactAlarmPermission();
+    }
+
+    private void promptForExactAlarmPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                || WorkScheduleManager.canScheduleExactReminders(this)) {
+            WorkScheduleManager.reschedule(this);
+            return;
+        }
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Cho phép nhắc đúng giờ")
+                .setMessage("Hãy cho phép ứng dụng đặt báo thức chính xác để lời nhắc xuất hiện đúng 10 phút trước ca làm.")
+                .setNegativeButton("Để sau", null)
+                .setPositiveButton("Mở cài đặt", (ignored, which) -> {
+                    Intent settingsIntent = new Intent(
+                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                            Uri.parse("package:" + getPackageName())
+                    );
+                    startActivity(settingsIntent);
+                })
+                .create();
+        showDialogWithBlur(dialog);
+    }
+
+    private void showBackgroundOptions() {
+        String savedUri = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_BACKGROUND_URI, "");
+        if (savedUri == null || savedUri.isEmpty()) {
+            openBackgroundPicker();
+            return;
+        }
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Tùy chỉnh ảnh nền")
+                .setItems(new String[]{"Chọn ảnh khác", "Dùng nền mặc định"}, (ignored, which) -> {
+                    if (which == 0) {
+                        openBackgroundPicker();
+                    } else {
+                        clearBackgroundImage(true);
+                    }
+                })
+                .setNegativeButton("Đóng", null)
+                .create();
+        showDialogWithBlur(dialog);
+    }
+
+    private void openBackgroundPicker() {
+        backgroundImagePicker.launch(new String[]{"image/*"});
+    }
+
+    private void onBackgroundImageSelected(Uri uri) {
+        if (uri == null) {
+            return;
+        }
+
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+            );
+        } catch (SecurityException ignored) {
+            // Một số trình chọn ảnh tự duy trì quyền đọc và không cấp cờ persistable.
+        }
+
+        try {
+            applyBackgroundImage(uri);
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(KEY_BACKGROUND_URI, uri.toString())
+                    .apply();
+            Toast.makeText(this, "Đã cập nhật ảnh nền", Toast.LENGTH_SHORT).show();
+        } catch (RuntimeException exception) {
+            clearBackgroundImage(false);
+            Toast.makeText(this, "Không thể mở ảnh này, hãy chọn ảnh khác", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void restoreBackgroundImage() {
+        String savedUri = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_BACKGROUND_URI, "");
+        if (savedUri == null || savedUri.isEmpty()) {
+            clearBackgroundImage(false);
+            return;
+        }
+
+        try {
+            applyBackgroundImage(Uri.parse(savedUri));
+        } catch (RuntimeException exception) {
+            clearBackgroundImage(false);
+        }
+    }
+
+    private void applyBackgroundImage(Uri uri) {
+        backgroundImageView.setImageURI(null);
+        backgroundImageView.setImageURI(uri);
+        if (backgroundImageView.getDrawable() == null) {
+            throw new IllegalArgumentException("Không đọc được ảnh nền");
+        }
+        backgroundImageView.setScaleX(1.08f);
+        backgroundImageView.setScaleY(1.08f);
+        backgroundImageView.setVisibility(View.VISIBLE);
+        backgroundScrim.setVisibility(View.VISIBLE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            backgroundImageView.setRenderEffect(RenderEffect.createBlurEffect(
+                    dp((int) BACKGROUND_BLUR_RADIUS_DP),
+                    dp((int) BACKGROUND_BLUR_RADIUS_DP),
+                    Shader.TileMode.CLAMP
+            ));
+        }
+    }
+
+    private void clearBackgroundImage(boolean showConfirmation) {
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_BACKGROUND_URI)
+                .apply();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            backgroundImageView.setRenderEffect(null);
+        }
+        backgroundImageView.setImageDrawable(null);
+        backgroundImageView.setVisibility(View.GONE);
+        backgroundScrim.setVisibility(View.GONE);
+        if (showConfirmation) {
+            Toast.makeText(this, "Đã dùng lại nền mặc định", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private TextView createEmptySummaryView() {
+        TextView emptyView = new TextView(this);
+        emptyView.setLayoutParams(new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(410)
+        ));
+        emptyView.setGravity(Gravity.CENTER);
+        emptyView.setPadding(dp(24), dp(24), dp(24), dp(24));
+        emptyView.setText(R.string.no_attendance_data);
+        emptyView.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurfaceVariant,
+                android.R.color.darker_gray
+        ));
+        emptyView.setTextSize(13);
+        return emptyView;
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private void confineDaySummaryScrolling() {
+        // Configure this after inflation. Setting android:nestedScrollingEnabled in XML
+        // can call into NestedScrollView before its helper has been initialized.
+        daySummaryScroll.setNestedScrollingEnabled(false);
+        daySummaryScroll.setOnTouchListener((view, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    summaryTouchDownX = event.getX();
+                    summaryTouchDownY = event.getY();
+                    view.getParent().requestDisallowInterceptTouchEvent(true);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    float distanceX = Math.abs(event.getX() - summaryTouchDownX);
+                    float distanceY = Math.abs(event.getY() - summaryTouchDownY);
+                    // Vertical gestures stay inside the day frame. Horizontal gestures are
+                    // handed to the surrounding table so all columns remain reachable.
+                    view.getParent().requestDisallowInterceptTouchEvent(distanceY >= distanceX);
+                    break;
+                case MotionEvent.ACTION_UP:
+                    if (Math.abs(event.getX() - summaryTouchDownX) < dp(4)
+                            && Math.abs(event.getY() - summaryTouchDownY) < dp(4)) {
+                        view.performClick();
+                    }
+                    view.getParent().requestDisallowInterceptTouchEvent(false);
+                    break;
+                case MotionEvent.ACTION_CANCEL:
+                    view.getParent().requestDisallowInterceptTouchEvent(false);
+                    break;
+                default:
+                    break;
+            }
+            return false;
+        });
+    }
+
     private void showCalendarDialog() {
         Map<LocalDate, DailySummary> summaries = attendanceStore.getSummariesForMonth(visibleMonth);
         LocalDate firstDay = visibleMonth.atDay(1);
 
         LinearLayout container = new LinearLayout(this);
         container.setOrientation(LinearLayout.VERTICAL);
-        int padding = dp(24);
-        container.setPadding(padding, padding, padding, padding);
+        container.setPadding(dp(8), dp(4), dp(8), dp(6));
+        container.addView(createCalendarOverview(summaries));
 
-        // Tạo hàng tiêu đề các thứ trong tuần
+        MaterialCardView calendarSurface = new MaterialCardView(this);
+        LinearLayout.LayoutParams calendarSurfaceParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        calendarSurfaceParams.topMargin = dp(12);
+        calendarSurface.setLayoutParams(calendarSurfaceParams);
+        calendarSurface.setRadius(dp(20));
+        calendarSurface.setCardElevation(0);
+        calendarSurface.setStrokeWidth(dp(1));
+        calendarSurface.setStrokeColor(getColor(R.color.attendance_glass_stroke));
+        calendarSurface.setCardBackgroundColor(getColor(R.color.attendance_glass_surface_strong));
+        calendarSurface.setContentPadding(dp(8), dp(12), dp(8), dp(10));
+
+        LinearLayout calendarContent = new LinearLayout(this);
+        calendarContent.setOrientation(LinearLayout.VERTICAL);
+
         LinearLayout headerRow = new LinearLayout(this);
         headerRow.setOrientation(LinearLayout.HORIZONTAL);
         String[] daysOfWeek = {"T2", "T3", "T4", "T5", "T6", "T7", "CN"};
@@ -200,135 +980,156 @@ public class MainActivity extends AppCompatActivity {
             tv.setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant, android.R.color.darker_gray));
             headerRow.addView(tv);
         }
-        container.addView(headerRow);
+        calendarContent.addView(headerRow);
 
-        // Vẽ lưới lịch
-        int startDow = firstDay.getDayOfWeek().getValue(); // 1 = T2, 7 = CN
+        int startDow = firstDay.getDayOfWeek().getValue();
         int daysInMonth = visibleMonth.lengthOfMonth();
 
         LinearLayout currentRow = new LinearLayout(this);
         currentRow.setOrientation(LinearLayout.HORIZONTAL);
-        currentRow.setPadding(0, dp(8), 0, 0);
+        currentRow.setPadding(0, dp(6), 0, 0);
 
-        // Chèn các ô trống vào đầu tháng (nếu mùng 1 không phải T2)
         for (int i = 1; i < startDow; i++) {
             currentRow.addView(createCalendarCell(null, 0));
         }
 
-        // Duyệt từng ngày trong tháng
         for (int day = 1; day <= daysInMonth; day++) {
             LocalDate date = visibleMonth.atDay(day);
             DailySummary summary = summaries.get(date);
             long minutes = summary != null ? summary.workedMinutes : 0;
 
-            currentRow.addView(createCalendarCell(String.valueOf(day), minutes));
+            currentRow.addView(createCalendarCell(date, minutes));
 
-            // Hết 1 tuần (chủ nhật) hoặc là ngày cuối cùng của tháng -> Chuyển sang hàng mới
             if (date.getDayOfWeek().getValue() == 7 || day == daysInMonth) {
-                // Nếu là ngày cuối tháng, thêm các ô trống để đủ 7 cột
                 if (day == daysInMonth) {
                     int endDow = date.getDayOfWeek().getValue();
                     for (int i = endDow; i < 7; i++) {
                         currentRow.addView(createCalendarCell(null, 0));
                     }
                 }
-                container.addView(currentRow);
+                calendarContent.addView(currentRow);
                 currentRow = new LinearLayout(this);
                 currentRow.setOrientation(LinearLayout.HORIZONTAL);
-                currentRow.setPadding(0, dp(8), 0, 0);
+                currentRow.setPadding(0, dp(6), 0, 0);
             }
         }
 
-        // Thêm chú thích màu sắc
-        container.addView(createLegendView());
+        calendarSurface.addView(calendarContent);
+        container.addView(calendarSurface);
 
-        new AlertDialog.Builder(this)
-                .setTitle("Lịch làm việc - Tháng " + MONTH_FORMAT.format(firstDay))
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Lịch làm việc • " + MONTH_FORMAT.format(firstDay))
                 .setView(container)
                 .setPositiveButton("Đóng", null)
-                .show();
+                .create();
+        showDialogWithBlur(dialog);
     }
 
-    private View createCalendarCell(String text, long workedMinutes) {
+    private View createCalendarOverview(Map<LocalDate, DailySummary> summaries) {
+        long totalMinutes = calculateMonthTotalMinutes(summaries);
+        int workedDays = 0;
+        for (DailySummary summary : summaries.values()) {
+            if (summary.workedMinutes > 0) {
+                workedDays++;
+            }
+        }
+
+        MaterialCardView card = new MaterialCardView(this);
+        card.setRadius(dp(18));
+        card.setCardElevation(0);
+        card.setStrokeWidth(dp(1));
+        card.setStrokeColor(getColor(R.color.attendance_glass_stroke));
+        card.setCardBackgroundColor(getColor(R.color.attendance_glass_surface));
+        card.setContentPadding(dp(16), dp(13), dp(16), dp(13));
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.HORIZONTAL);
+        content.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout labels = new LinearLayout(this);
+        labels.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        labels.setOrientation(LinearLayout.VERTICAL);
+
+        TextView title = new TextView(this);
+        title.setText("Tổng thời gian trong tháng");
+        title.setTextSize(12);
+        title.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurfaceVariant,
+                android.R.color.darker_gray
+        ));
+        labels.addView(title);
+
+        TextView total = new TextView(this);
+        total.setText(formatDuration(totalMinutes));
+        total.setTextSize(20);
+        total.setTypeface(total.getTypeface(), android.graphics.Typeface.BOLD);
+        total.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurface,
+                android.R.color.black
+        ));
+        labels.addView(total);
+
+        TextView days = new TextView(this);
+        days.setText(workedDays + " ngày đi làm");
+        days.setTextSize(12);
+        days.setTextColor(resolveThemeColor(
+                android.R.attr.colorAccent,
+                android.R.color.holo_green_dark
+        ));
+        days.setTypeface(days.getTypeface(), android.graphics.Typeface.BOLD);
+
+        content.addView(labels);
+        content.addView(days);
+        card.addView(content);
+        return card;
+    }
+
+    private View createCalendarCell(LocalDate date, long workedMinutes) {
         TextView tv = new TextView(this);
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(40), 1);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(42), 1);
         params.setMargins(dp(2), dp(2), dp(2), dp(2));
         tv.setLayoutParams(params);
         tv.setGravity(Gravity.CENTER);
 
-        if (text == null) {
+        if (date == null) {
             tv.setBackgroundColor(android.graphics.Color.TRANSPARENT);
             return tv;
         }
 
-        tv.setText(text);
+        tv.setText(String.valueOf(date.getDayOfMonth()));
         tv.setTextSize(14);
         tv.setTypeface(null, android.graphics.Typeface.BOLD);
+        tv.setContentDescription(formatCatchUpDate(date) + ", " + formatDuration(workedMinutes));
 
-        // Logic chia màu (Heatmap)
         int bgColor;
         int textColor = android.graphics.Color.BLACK;
 
         if (workedMinutes == 0) {
-            bgColor = android.graphics.Color.parseColor("#20888888"); // Xám nhạt (trong suốt 20%)
+            bgColor = android.graphics.Color.parseColor("#20888888");
             textColor = resolveThemeColor(com.google.android.material.R.attr.colorOnSurface, android.R.color.black);
         } else if (workedMinutes <= 4 * 60) {
-            bgColor = android.graphics.Color.parseColor("#90CAF9"); // Xanh dương nhạt (Làm ít)
+            bgColor = android.graphics.Color.parseColor("#9FD7F7");
         } else if (workedMinutes <= 8 * 60) {
-            bgColor = android.graphics.Color.parseColor("#42A5F5"); // Xanh dương vừa (Làm chuẩn)
+            bgColor = android.graphics.Color.parseColor("#4A9EE8");
         } else {
-            bgColor = android.graphics.Color.parseColor("#1565C0"); // Xanh dương đậm (Làm nhiều / Tăng ca)
+            bgColor = android.graphics.Color.parseColor("#1769AA");
             textColor = android.graphics.Color.WHITE;
         }
 
         android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
         gd.setColor(bgColor);
-        gd.setCornerRadius(dp(8));
+        gd.setCornerRadius(dp(12));
+        if (date.equals(LocalDate.now())) {
+            gd.setStroke(dp(2), resolveThemeColor(
+                    android.R.attr.colorAccent,
+                    android.R.color.holo_green_dark
+            ));
+        }
         tv.setBackground(gd);
         tv.setTextColor(textColor);
 
         return tv;
     }
-
-    private View createLegendView() {
-        LinearLayout legend = new LinearLayout(this);
-        legend.setOrientation(LinearLayout.HORIZONTAL);
-        legend.setGravity(Gravity.CENTER);
-        legend.setPadding(0, dp(24), 0, 0);
-
-        legend.addView(createLegendItem("#20888888", "Nghỉ"));
-        legend.addView(createLegendItem("#90CAF9", "<4h"));
-        legend.addView(createLegendItem("#42A5F5", "4-8h"));
-        legend.addView(createLegendItem("#1565C0", ">8h"));
-
-        return legend;
-    }
-
-    private View createLegendItem(String colorHex, String label) {
-        LinearLayout item = new LinearLayout(this);
-        item.setOrientation(LinearLayout.HORIZONTAL);
-        item.setGravity(Gravity.CENTER_VERTICAL);
-        item.setPadding(dp(4), 0, dp(8), 0);
-
-        View colorBox = new View(this);
-        colorBox.setLayoutParams(new LinearLayout.LayoutParams(dp(12), dp(12)));
-        android.graphics.drawable.GradientDrawable gd = new android.graphics.drawable.GradientDrawable();
-        gd.setColor(android.graphics.Color.parseColor(colorHex));
-        gd.setCornerRadius(dp(2));
-        colorBox.setBackground(gd);
-
-        TextView tv = new TextView(this);
-        tv.setLayoutParams(new LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        tv.setText(label);
-        tv.setTextSize(11);
-        tv.setPadding(dp(4), 0, 0, 0);
-        tv.setTextColor(resolveThemeColor(com.google.android.material.R.attr.colorOnSurfaceVariant, android.graphics.Color.GRAY));
-
-        item.addView(colorBox);
-        item.addView(tv);
-        return item;
-    }
-    // HẾT PHẦN LỊCH MỚI
 
     private String getMonthKey(YearMonth month) {
         return "parking_count_" + month.getYear() + "_" + month.getMonthValue();
@@ -489,7 +1290,8 @@ public class MainActivity extends AppCompatActivity {
 
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(0, dp(8), 0, 0);
+        form.setPadding(dp(6), dp(4), dp(6), dp(2));
+        form.addView(createCatchUpIntro());
 
         Button dateButton = createDialogChoiceButton(formatCatchUpDate(draft.date));
         Button checkInTimeButton = createDialogChoiceButton(formatTime(draft.checkInTime));
@@ -522,7 +1324,7 @@ public class MainActivity extends AppCompatActivity {
                 }
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Điểm danh bù")
                 .setView(form)
                 .setNegativeButton("Hủy", null)
@@ -536,7 +1338,33 @@ public class MainActivity extends AppCompatActivity {
                     }
                 })
         );
+        showDialogWithBlur(dialog);
+    }
+
+    private void showDialogWithBlur(AlertDialog dialog) {
+        View activityContent = findViewById(android.R.id.content);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            activityContent.setRenderEffect(RenderEffect.createBlurEffect(
+                    dp(12),
+                    dp(12),
+                    Shader.TileMode.CLAMP
+            ));
+        }
+
+        dialog.setOnDismissListener(ignored -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                activityContent.setRenderEffect(null);
+            }
+        });
         dialog.show();
+
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            attributes.dimAmount = DIALOG_DIM_AMOUNT;
+            window.setAttributes(attributes);
+        }
     }
 
     private void showCatchUpDatePicker(
@@ -617,16 +1445,72 @@ public class MainActivity extends AppCompatActivity {
                 : LocalTime.of(17, 0);
     }
 
+    private View createCatchUpIntro() {
+        MaterialCardView card = new MaterialCardView(this);
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        cardParams.bottomMargin = dp(8);
+        card.setLayoutParams(cardParams);
+        card.setRadius(dp(18));
+        card.setCardElevation(0);
+        card.setStrokeWidth(dp(1));
+        card.setStrokeColor(getColor(R.color.attendance_glass_stroke));
+        card.setCardBackgroundColor(getColor(R.color.attendance_glass_surface));
+        card.setContentPadding(dp(15), dp(13), dp(15), dp(13));
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+
+        TextView title = new TextView(this);
+        title.setText("Bổ sung ngày chấm công còn thiếu");
+        title.setTextSize(15);
+        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        title.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurface,
+                android.R.color.black
+        ));
+        content.addView(title);
+
+        TextView description = new TextView(this);
+        description.setText("Chọn ngày, giờ vào và giờ ra. Bạn sẽ xác thực vân tay trước khi lưu.");
+        description.setPadding(0, dp(4), 0, 0);
+        description.setTextSize(12);
+        description.setLineSpacing(0, 1.08f);
+        description.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurfaceVariant,
+                android.R.color.darker_gray
+        ));
+        content.addView(description);
+        card.addView(content);
+        return card;
+    }
+
     private View createDialogRow(String label, Button valueButton) {
+        MaterialCardView card = new MaterialCardView(this);
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        cardParams.setMargins(0, dp(4), 0, dp(4));
+        card.setLayoutParams(cardParams);
+        card.setRadius(dp(18));
+        card.setCardElevation(0);
+        card.setStrokeWidth(dp(1));
+        card.setStrokeColor(getColor(R.color.attendance_glass_stroke));
+        card.setCardBackgroundColor(getColor(R.color.attendance_glass_surface_strong));
+
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(6), 0, dp(6));
+        row.setPadding(dp(14), dp(10), dp(10), dp(10));
 
         TextView labelView = new TextView(this);
-        labelView.setLayoutParams(new LinearLayout.LayoutParams(dp(88), LinearLayout.LayoutParams.WRAP_CONTENT));
+        labelView.setLayoutParams(new LinearLayout.LayoutParams(dp(78), LinearLayout.LayoutParams.WRAP_CONTENT));
         labelView.setText(label);
-        labelView.setTextSize(15);
+        labelView.setTextSize(13);
+        labelView.setTypeface(labelView.getTypeface(), android.graphics.Typeface.BOLD);
         labelView.setTextColor(resolveThemeColor(
                 com.google.android.material.R.attr.colorOnSurfaceVariant,
                 android.R.color.darker_gray
@@ -634,15 +1518,31 @@ public class MainActivity extends AppCompatActivity {
 
         row.addView(labelView);
         row.addView(valueButton);
-        return row;
+        card.addView(row);
+        return card;
     }
 
     private Button createDialogChoiceButton(String value) {
-        Button button = new Button(this);
-        button.setLayoutParams(new LinearLayout.LayoutParams(0, dp(48), 1));
+        MaterialButton button = new MaterialButton(this);
+        button.setLayoutParams(new LinearLayout.LayoutParams(0, dp(46), 1));
         button.setAllCaps(false);
         button.setGravity(Gravity.CENTER);
         button.setText(value);
+        button.setTextSize(13);
+        button.setMinWidth(0);
+        button.setInsetTop(0);
+        button.setInsetBottom(0);
+        button.setCornerRadius(dp(14));
+        button.setStrokeWidth(dp(1));
+        button.setStrokeColor(ColorStateList.valueOf(getColor(R.color.attendance_glass_stroke)));
+        button.setBackgroundTintList(ColorStateList.valueOf(resolveThemeColor(
+                com.google.android.material.R.attr.colorPrimaryContainer,
+                android.R.color.white
+        )));
+        button.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnPrimaryContainer,
+                android.R.color.black
+        ));
         return button;
     }
 
@@ -684,6 +1584,8 @@ public class MainActivity extends AppCompatActivity {
         parkingAddButton.setEnabled(!promptShowing);
         parkingMinusButton.setEnabled(!promptShowing);
         viewCalendarButton.setEnabled(!promptShowing);
+        backgroundButton.setEnabled(!promptShowing);
+        importScheduleButton.setEnabled(!promptShowing && !scheduleImportInProgress);
         previousMonthButton.setEnabled(!promptShowing);
         nextMonthButton.setEnabled(!promptShowing && visibleMonth.isBefore(currentMonth));
 
@@ -703,9 +1605,11 @@ public class MainActivity extends AppCompatActivity {
         updateParkingFeeDisplay();
 
         monthlySummaryContainer.removeAllViews();
+        daySummaryScroll.scrollTo(0, 0);
 
         if (summaries.isEmpty()) {
             emptySummaryText.setVisibility(View.VISIBLE);
+            monthlySummaryContainer.addView(emptySummaryText);
             return;
         }
 
@@ -713,7 +1617,6 @@ public class MainActivity extends AppCompatActivity {
         for (LocalDate date = month.atDay(1); !date.isAfter(lastVisibleDay); date = date.plusDays(1)) {
             DailySummary summary = summaries.get(date);
             monthlySummaryContainer.addView(createSummaryRow(summary != null ? summary : DailySummary.empty(date)));
-            monthlySummaryContainer.addView(createDivider());
         }
     }
 
@@ -727,48 +1630,93 @@ public class MainActivity extends AppCompatActivity {
 
     private View createSummaryRow(DailySummary summary) {
         LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(0, dp(12), 0, dp(12));
-        row.addView(createCell(DAY_FORMAT.format(summary.date), 1.1f, Gravity.START, false));
-        row.addView(createCell(formatTime(summary.firstIn), 0.9f, Gravity.CENTER, false));
-        row.addView(createCell(formatTime(summary.lastOut), 0.9f, Gravity.CENTER, false));
-        row.addView(createCell(formatStandardWorkDuration(summary), 0.9f, Gravity.END, false));
-        row.addView(createCell(formatOvertimeDuration(summary), 0.9f, Gravity.END, false));
-        row.addView(createCell(formatSummaryDuration(summary), 1.1f, Gravity.END, true));
+        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        rowParams.setMargins(0, dp(3), 0, dp(3));
+        row.setLayoutParams(rowParams);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setBackgroundResource(R.drawable.bg_summary_row);
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView dateText = new TextView(this);
+        dateText.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        dateText.setText(capitalize(SUMMARY_DAY_FORMAT.format(summary.date)));
+        dateText.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurface,
+                android.R.color.black
+        ));
+        dateText.setTextSize(14);
+        dateText.setTypeface(dateText.getTypeface(), android.graphics.Typeface.BOLD);
+        titleRow.addView(dateText);
+
+        TextView totalText = new TextView(this);
+        totalText.setText(formatSummaryDuration(summary));
+        totalText.setTextColor(resolveThemeColor(
+                android.R.attr.colorAccent,
+                android.R.color.holo_green_dark
+        ));
+        totalText.setTextSize(14);
+        totalText.setTypeface(totalText.getTypeface(), android.graphics.Typeface.BOLD);
+        titleRow.addView(totalText);
+        row.addView(titleRow);
+
+        LinearLayout metrics = new LinearLayout(this);
+        LinearLayout.LayoutParams metricParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        metricParams.topMargin = dp(8);
+        metrics.setLayoutParams(metricParams);
+        metrics.setOrientation(LinearLayout.HORIZONTAL);
+        metrics.addView(createMetricCell("Vào", formatTime(summary.firstIn), false));
+        metrics.addView(createMetricCell("Ra", formatTime(summary.lastOut), false));
+        metrics.addView(createMetricCell("Giờ công", formatStandardWorkDuration(summary), false));
+        metrics.addView(createMetricCell(
+                "Tăng ca",
+                formatOvertimeDuration(summary),
+                AttendanceCalculator.overtimeMinutes(summary.workedMinutes) > 0
+        ));
+        row.addView(metrics);
         return row;
     }
 
-    private TextView createCell(String value, float weight, int gravity, boolean strong) {
-        TextView textView = new TextView(this);
-        textView.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight));
-        textView.setGravity(gravity);
-        textView.setText(value);
-        textView.setTextSize(14);
-        textView.setTextColor(resolveThemeColor(
-                strong
-                        ? com.google.android.material.R.attr.colorOnSurface
-                        : com.google.android.material.R.attr.colorOnSurfaceVariant,
-                strong ? android.R.color.black : android.R.color.darker_gray
-        ));
-        textView.setSingleLine(false);
-        if (strong) {
-            textView.setTypeface(textView.getTypeface(), android.graphics.Typeface.BOLD);
-        }
-        return textView;
-    }
+    private View createMetricCell(String label, String value, boolean highlightOvertime) {
+        LinearLayout metric = new LinearLayout(this);
+        metric.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        metric.setOrientation(LinearLayout.VERTICAL);
+        metric.setGravity(Gravity.CENTER);
 
-    private View createDivider() {
-        View divider = new View(this);
-        divider.setLayoutParams(new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                Math.max(1, dp(1))
-        ));
-        divider.setBackgroundColor(resolveThemeColor(
-                com.google.android.material.R.attr.colorOutlineVariant,
+        TextView labelText = new TextView(this);
+        labelText.setText(label);
+        labelText.setGravity(Gravity.CENTER);
+        labelText.setTextColor(resolveThemeColor(
+                com.google.android.material.R.attr.colorOnSurfaceVariant,
                 android.R.color.darker_gray
         ));
-        return divider;
+        labelText.setTextSize(10);
+
+        TextView valueText = new TextView(this);
+        valueText.setText(value);
+        valueText.setGravity(Gravity.CENTER);
+        valueText.setMaxLines(1);
+        valueText.setTextSize(highlightOvertime ? 14 : 13);
+        valueText.setTypeface(valueText.getTypeface(), android.graphics.Typeface.BOLD);
+        valueText.setTextColor(highlightOvertime
+                ? getColor(R.color.attendance_overtime)
+                : resolveThemeColor(
+                        com.google.android.material.R.attr.colorOnSurface,
+                        android.R.color.black
+                ));
+
+        metric.addView(labelText);
+        metric.addView(valueText);
+        return metric;
     }
 
     private int resolveThemeColor(int attr, int fallbackColorRes) {
@@ -806,14 +1754,26 @@ public class MainActivity extends AppCompatActivity {
         if (summary.firstIn != null && summary.lastOut == null) {
             return "Chưa ra";
         }
-        return formatDuration(AttendanceCalculator.standardWorkMinutes(summary.workedMinutes));
+        return formatCompactDuration(AttendanceCalculator.standardWorkMinutes(summary.workedMinutes));
     }
 
     private String formatOvertimeDuration(DailySummary summary) {
         if (summary.firstIn != null && summary.lastOut == null) {
             return "Chưa ra";
         }
-        return formatDuration(AttendanceCalculator.overtimeMinutes(summary.workedMinutes));
+        return formatCompactDuration(AttendanceCalculator.overtimeMinutes(summary.workedMinutes));
+    }
+
+    private String formatCompactDuration(long totalMinutes) {
+        long hours = totalMinutes / 60;
+        long minutes = totalMinutes % 60;
+        if (hours <= 0) {
+            return minutes + "p";
+        }
+        if (minutes == 0) {
+            return hours + "g";
+        }
+        return hours + "g " + minutes + "p";
     }
 
     private String formatDuration(long totalMinutes) {
@@ -868,6 +1828,18 @@ public class MainActivity extends AppCompatActivity {
             this.date = date;
             this.checkInTime = LocalTime.of(8, 0);
             this.checkOutTime = LocalTime.of(17, 0);
+        }
+    }
+
+    private static final class ScheduleShiftDraft {
+        private LocalDate date;
+        private LocalTime start;
+        private LocalTime end;
+
+        private ScheduleShiftDraft(LocalDate date, LocalTime start, LocalTime end) {
+            this.date = date;
+            this.start = start;
+            this.end = end;
         }
     }
 

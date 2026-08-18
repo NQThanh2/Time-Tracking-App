@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">Điểm danh vân tay</string>
+    <string name="no_attendance_data">Chưa có dữ liệu chấm công trong tháng này</string>
+    <string name="background_image">Ảnh nền</string>
+    <string name="personal_schedule">Lịch làm cá nhân</string>
+    <string name="schedule_not_imported">Đọc lịch từ ảnh hoặc thêm ca làm thủ công</string>
+    <string name="import_schedule">Nhập / sửa</string>
 </resources>

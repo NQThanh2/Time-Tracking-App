@@ -7,6 +7,8 @@
         <item name="colorOnPrimaryContainer">@color/attendance_on_primary_container</item>
         <item name="colorSecondary">@color/attendance_secondary</item>
         <item name="colorOnSecondary">@color/attendance_on_secondary</item>
+        <item name="colorSecondaryContainer">@color/attendance_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/attendance_on_secondary_container</item>
         <item name="colorSurface">@color/attendance_surface</item>
         <item name="colorOnSurface">@color/attendance_on_surface</item>
         <item name="colorOnSurfaceVariant">@color/attendance_on_surface_variant</item>

@@ -6,10 +6,20 @@
     <color name="attendance_on_primary_container">#8EF7C8</color>
     <color name="attendance_secondary">#C0CCBF</color>
     <color name="attendance_on_secondary">#2B332E</color>
+    <color name="attendance_secondary_container">#404943</color>
+    <color name="attendance_on_secondary_container">#DDE5DD</color>
     <color name="attendance_surface">#101411</color>
     <color name="attendance_on_surface">#E1E4DF</color>
     <color name="attendance_on_surface_variant">#C1C9BF</color>
     <color name="attendance_outline">#8B9389</color>
     <color name="attendance_outline_variant">#414942</color>
-    <color name="attendance_surface_container">#1B211C</color>
+    <color name="attendance_background_top">#101C18</color>
+    <color name="attendance_background_center">#101411</color>
+    <color name="attendance_background_bottom">#111A22</color>
+    <color name="attendance_glass_surface">#00000000</color>
+    <color name="attendance_glass_surface_strong">#00000000</color>
+    <color name="attendance_glass_header">#00000000</color>
+    <color name="attendance_glass_row">#00000000</color>
+    <color name="attendance_glass_stroke">#997F8C85</color>
+    <color name="attendance_overtime">#FF5A52</color>
 </resources>
