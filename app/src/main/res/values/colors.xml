@@ -1,28 +1,34 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <color name="attendance_disabled_surface">#E0EAF0</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
-
-    <color name="attendance_primary">#006C4D</color>
+    <color name="attendance_primary">#096D70</color>
     <color name="attendance_on_primary">#FFFFFF</color>
-    <color name="attendance_primary_container">#8EF7C8</color>
-    <color name="attendance_on_primary_container">#002115</color>
-    <color name="attendance_secondary">#59645D</color>
+    <color name="attendance_primary_container">#C5EEEB</color>
+    <color name="attendance_on_primary_container">#124F52</color>
+    <color name="attendance_secondary">#4B6D83</color>
     <color name="attendance_on_secondary">#FFFFFF</color>
-    <color name="attendance_secondary_container">#DDE5DD</color>
-    <color name="attendance_on_secondary_container">#161D18</color>
-    <color name="attendance_surface">#FBFDF8</color>
-    <color name="attendance_on_surface">#191C1A</color>
-    <color name="attendance_on_surface_variant">#414942</color>
-    <color name="attendance_outline">#717970</color>
-    <color name="attendance_outline_variant">#C1C9BF</color>
-    <color name="attendance_background_top">#EAF5F1</color>
-    <color name="attendance_background_center">#F7FBF8</color>
-    <color name="attendance_background_bottom">#E8F0F7</color>
-    <color name="attendance_glass_surface">#00FFFFFF</color>
-    <color name="attendance_glass_surface_strong">#00FFFFFF</color>
-    <color name="attendance_glass_header">#00FFFFFF</color>
-    <color name="attendance_glass_row">#00FFFFFF</color>
-    <color name="attendance_glass_stroke">#80717A73</color>
-    <color name="attendance_overtime">#E00000</color>
+    <color name="attendance_secondary_container">#D7E8F3</color>
+    <color name="attendance_on_secondary_container">#25475B</color>
+    <color name="attendance_surface">#F1F8FA</color>
+    <color name="attendance_on_surface">#182F40</color>
+    <color name="attendance_on_surface_variant">#526878</color>
+    <color name="attendance_outline">#728997</color>
+    <color name="attendance_outline_variant">#C5D8DE</color>
+    <color name="attendance_background_top">#C6E6E6</color>
+    <color name="attendance_background_center">#E6EFF5</color>
+    <color name="attendance_background_bottom">#D9E1F6</color>
+    <color name="attendance_glass_surface">#B8F7FCFF</color>
+    <color name="attendance_glass_surface_strong">#9EFFFFFF</color>
+    <color name="attendance_glass_header">#70D3E8F0</color>
+    <color name="attendance_glass_row">#7AFFFFFF</color>
+    <color name="attendance_glass_stroke">#609BB8C6</color>
+    <color name="attendance_glass_highlight">#EFFFFFFF</color>
+    <color name="attendance_glass_reflection">#60FFFFFF</color>
+    <color name="attendance_glass_shadow">#42677E</color>
+    <color name="attendance_dialog_surface">#F0F8FC</color>
+    <color name="attendance_glow_teal">#9899DDD2</color>
+    <color name="attendance_glow_blue">#8AB4C1F3</color>
+    <color name="attendance_photo_scrim">#88E4EEF3</color>
+    <color name="attendance_overtime">#B83D46</color>
 </resources>

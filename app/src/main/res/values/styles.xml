@@ -1,0 +1,56 @@
+<resources>
+    <style name="Widget.Attendance.GlassCard" parent="Widget.Material3.CardView.Elevated">
+        <item name="cardBackgroundColor">@color/attendance_glass_surface</item>
+        <item name="cardCornerRadius">28dp</item>
+        <item name="cardElevation">8dp</item>
+        <item name="contentPadding">20dp</item>
+        <item name="strokeWidth">0dp</item>
+        <item name="cardPreventCornerOverlap">false</item>
+    </style>
+    <style name="Widget.Attendance.GlassButton" parent="Widget.Material3.Button.TonalButton">
+        <item name="backgroundTint">@color/attendance_button_tonal</item>
+        <item name="android:textColor">@color/attendance_button_tonal_text</item>
+        <item name="iconTint">@color/attendance_button_tonal_text</item>
+        <item name="android:elevation">0dp</item>
+        <item name="android:minHeight">52dp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:paddingLeft">12dp</item>
+        <item name="android:paddingRight">12dp</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:stateListAnimator">@animator/glass_button_press</item>
+        <item name="cornerRadius">18dp</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="strokeColor">@color/attendance_glass_highlight</item>
+        <item name="iconSize">20dp</item>
+        <item name="iconGravity">textStart</item>
+    </style>
+    <style name="Widget.Attendance.PrimaryButton" parent="Widget.Attendance.GlassButton">
+        <item name="backgroundTint">@color/attendance_button_primary</item>
+        <item name="android:textColor">@color/attendance_button_text</item>
+        <item name="iconTint">@color/attendance_button_text</item>
+    </style>
+    <style name="Widget.Attendance.IconButton" parent="Widget.Attendance.GlassButton">
+        <item name="android:paddingLeft">12dp</item>
+        <item name="android:paddingRight">12dp</item>
+        <item name="iconPadding">0dp</item>
+        <item name="cornerRadius">16dp</item>
+    </style>
+    <style name="TextAppearance.Attendance.Label" parent="TextAppearance.Material3.LabelMedium">
+        <item name="android:textColor">?attr/colorOnSurfaceVariant</item>
+        <item name="android:textSize">12sp</item>
+    </style>
+    <style name="TextAppearance.Attendance.Title" parent="TextAppearance.Material3.TitleMedium">
+        <item name="android:textColor">?attr/colorOnSurface</item>
+        <item name="android:textSize">18sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+    </style>
+    <style name="ShapeAppearance.Attendance.Dialog" parent="ShapeAppearance.Material3.Corner.ExtraLarge">
+        <item name="cornerSize">28dp</item>
+    </style>
+    <style name="ThemeOverlay.Attendance.Dialog" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="colorSurface">@color/attendance_dialog_surface</item>
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Attendance.Dialog</item>
+    </style>
+</resources>

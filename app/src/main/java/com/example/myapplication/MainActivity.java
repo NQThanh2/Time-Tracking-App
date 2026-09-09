@@ -1,20 +1,16 @@
 package com.example.myapplication;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
+import android.animation.ValueAnimator;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.app.DatePickerDialog;
 import android.app.TimePickerDialog;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Rect;
 import android.graphics.RenderEffect;
 import android.graphics.Shader;
 import android.hardware.biometrics.BiometricManager;
@@ -23,7 +19,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -50,16 +45,7 @@ import androidx.core.widget.NestedScrollView;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
-import com.google.android.material.textfield.TextInputEditText;
-import com.google.android.material.textfield.TextInputLayout;
-import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.Text;
-import com.google.mlkit.vision.text.TextRecognition;
-import com.google.mlkit.vision.text.TextRecognizer;
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -93,7 +79,6 @@ public class MainActivity extends AppCompatActivity {
     private static final int PARKING_FEE_PER_TIME = 5000;
     private static final float DIALOG_DIM_AMOUNT = 0.22f;
     private static final float BACKGROUND_BLUR_RADIUS_DP = 18f;
-    private static final int[] SCHEDULE_OCR_ROTATIONS = {0, 270, 90, 180};
 
     private AttendanceStore attendanceStore;
     private TextView biometricStatusText;
@@ -118,8 +103,6 @@ public class MainActivity extends AppCompatActivity {
     private Button backgroundButton;
     private ImageView backgroundImageView;
     private View backgroundScrim;
-    private TextView scheduleStatusText;
-    private Button importScheduleButton;
 
     private com.google.android.material.textfield.TextInputEditText hourlyWageInput;
     private TextView monthlySalaryText;
@@ -131,19 +114,9 @@ public class MainActivity extends AppCompatActivity {
     private boolean promptShowing;
     private float summaryTouchDownX;
     private float summaryTouchDownY;
-    private String pendingScheduleName = "";
-    private TextRecognizer scheduleTextRecognizer;
-    private boolean scheduleImportInProgress;
 
     private final ActivityResultLauncher<String[]> backgroundImagePicker =
             registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onBackgroundImageSelected);
-    private final ActivityResultLauncher<String[]> scheduleImagePicker =
-            registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onScheduleImageSelected);
-    private final ActivityResultLauncher<String> notificationPermissionLauncher =
-            registerForActivityResult(
-                    new ActivityResultContracts.RequestPermission(),
-                    ignored -> promptForExactAlarmPermission()
-            );
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -158,10 +131,8 @@ public class MainActivity extends AppCompatActivity {
         });
 
         attendanceStore = new AttendanceStore(this);
-        scheduleTextRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
         bindViews();
         restoreBackgroundImage();
-        updateScheduleStatus();
         confineDaySummaryScrolling();
 
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
@@ -199,7 +170,6 @@ public class MainActivity extends AppCompatActivity {
         // Bắt sự kiện bấm vào nút xem lịch
         viewCalendarButton.setOnClickListener(v -> showCalendarDialog());
         backgroundButton.setOnClickListener(v -> showBackgroundOptions());
-        importScheduleButton.setOnClickListener(v -> showScheduleImportDialog());
 
         previousMonthButton.setOnClickListener(v -> {
             visibleMonth = visibleMonth.minusMonths(1);
@@ -215,6 +185,28 @@ public class MainActivity extends AppCompatActivity {
 
         updateBiometricStatus();
         renderDashboard();
+        if (savedInstanceState == null) {
+            animateDashboardEntrance();
+        }
+    }
+
+    private void animateDashboardEntrance() {
+        if (!ValueAnimator.areAnimatorsEnabled()) {
+            return;
+        }
+        int[] cardIds = {R.id.todayCard, R.id.monthCard, R.id.summaryFrame};
+        for (int index = 0; index < cardIds.length; index++) {
+            View card = findViewById(cardIds[index]);
+            card.setAlpha(0f);
+            card.setTranslationY(dp(18));
+            card.animate()
+                    .alpha(1f)
+                    .translationY(0f)
+                    .setStartDelay(index * 70L)
+                    .setDuration(420)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .start();
+        }
     }
 
     private void bindViews() {
@@ -244,545 +236,6 @@ public class MainActivity extends AppCompatActivity {
         hourlyWageInput = findViewById(R.id.hourlyWageInput);
         monthlySalaryText = findViewById(R.id.monthlySalaryText);
         parkingFeeText = findViewById(R.id.parkingFeeText);
-        scheduleStatusText = findViewById(R.id.scheduleStatusText);
-        importScheduleButton = findViewById(R.id.importScheduleButton);
-    }
-
-    @Override
-    protected void onResume() {
-        super.onResume();
-        if (scheduleStatusText != null) {
-            WorkScheduleManager.reschedule(this);
-            if (scheduleImportInProgress) {
-                scheduleStatusText.setText("Đang đọc ảnh và tìm tên " + pendingScheduleName + "…");
-            } else {
-                updateScheduleStatus();
-            }
-        }
-    }
-
-    @Override
-    protected void onDestroy() {
-        if (scheduleTextRecognizer != null) {
-            scheduleTextRecognizer.close();
-        }
-        super.onDestroy();
-    }
-
-    private void showScheduleImportDialog() {
-        List<WorkShift> savedShifts = WorkScheduleManager.loadShifts(this);
-        if (savedShifts.isEmpty()) {
-            AlertDialog dialog = new MaterialAlertDialogBuilder(this)
-                    .setTitle("Nhập lịch làm")
-                    .setItems(new String[]{
-                            "Đọc lịch từ ảnh",
-                            "Thêm ca làm thủ công"
-                    }, (ignored, which) -> {
-                        if (which == 0) {
-                            showScheduleImageImportDialog();
-                        } else {
-                            showManualScheduleNameDialog();
-                        }
-                    })
-                    .setNegativeButton("Đóng", null)
-                    .create();
-            showDialogWithBlur(dialog);
-            return;
-        }
-
-        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
-                .setTitle("Lịch làm cá nhân")
-                .setItems(new String[]{
-                        "Xem và chỉnh sửa " + savedShifts.size() + " ca đã lưu",
-                        "Thêm ca làm còn thiếu",
-                        "Đọc lại lịch từ ảnh"
-                }, (ignored, which) -> {
-                    String employeeName = WorkScheduleManager.getEmployeeName(this);
-                    List<WorkShift> editableShifts = new ArrayList<>(savedShifts);
-                    if (which == 0) {
-                        showScheduleEditor(employeeName, editableShifts, false);
-                    } else if (which == 1) {
-                        showScheduleShiftEditor(employeeName, editableShifts, -1, false);
-                    } else {
-                        showScheduleImageImportDialog();
-                    }
-                })
-                .setNegativeButton("Đóng", null)
-                .create();
-        showDialogWithBlur(dialog);
-    }
-
-    private void showScheduleImageImportDialog() {
-        TextInputLayout nameInputLayout = new TextInputLayout(this);
-        nameInputLayout.setHint("Họ và tên của bạn");
-        nameInputLayout.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_OUTLINE);
-
-        TextInputEditText nameInput = new TextInputEditText(nameInputLayout.getContext());
-        nameInput.setSingleLine(true);
-        nameInput.setText(pendingScheduleName.isEmpty()
-                ? WorkScheduleManager.getEmployeeName(this)
-                : pendingScheduleName);
-        nameInputLayout.addView(nameInput, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-
-        TextView helpText = new TextView(this);
-        helpText.setText("Chọn ảnh có đầy đủ tên và các cột ngày. Ứng dụng sẽ tìm đúng dòng tên này; hai số trong mỗi ngày được hiểu là giờ vào và giờ ra.");
-        helpText.setTextColor(resolveThemeColor(
-                com.google.android.material.R.attr.colorOnSurfaceVariant,
-                android.R.color.darker_gray
-        ));
-        helpText.setTextSize(13);
-
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        int horizontalPadding = dp(20);
-        content.setPadding(horizontalPadding, dp(8), horizontalPadding, 0);
-        content.addView(nameInputLayout);
-        LinearLayout.LayoutParams helpParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
-        helpParams.topMargin = dp(12);
-        content.addView(helpText, helpParams);
-
-        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
-                .setTitle("Lọc lịch theo tên")
-                .setView(content)
-                .setNegativeButton("Hủy", null)
-                .setPositiveButton("Chọn ảnh", null)
-                .create();
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                .setOnClickListener(v -> {
-                    String name = nameInput.getText() == null
-                            ? ""
-                            : nameInput.getText().toString().trim();
-                    if (name.isEmpty()) {
-                        nameInputLayout.setError("Hãy nhập họ và tên của bạn");
-                        return;
-                    }
-                    nameInputLayout.setError(null);
-                    pendingScheduleName = name;
-                    dialog.dismiss();
-                    scheduleImagePicker.launch(new String[]{"image/*"});
-                }));
-        showDialogWithBlur(dialog);
-    }
-
-    private void onScheduleImageSelected(Uri uri) {
-        if (uri == null || pendingScheduleName.isEmpty()) {
-            return;
-        }
-
-        try {
-            getContentResolver().takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-            );
-        } catch (SecurityException ignored) {
-            // The selected document can still be read for this import session.
-        }
-
-        setScheduleImportBusy(true);
-        new Thread(() -> {
-            try {
-                Bitmap bitmap = decodeScheduleBitmap(uri);
-                runOnUiThread(() -> recognizeScheduleAtRotation(bitmap, 0, null));
-            } catch (IOException | RuntimeException exception) {
-                runOnUiThread(() -> finishScheduleImportWithError(
-                        "Không mở được ảnh đã chọn. Hãy thử chọn lại ảnh rõ hơn."
-                ));
-            }
-        }, "schedule-image-loader").start();
-    }
-
-    private Bitmap decodeScheduleBitmap(Uri uri) throws IOException {
-        BitmapFactory.Options bounds = new BitmapFactory.Options();
-        bounds.inJustDecodeBounds = true;
-        try (InputStream stream = getContentResolver().openInputStream(uri)) {
-            if (stream == null) {
-                throw new IOException("Image stream is unavailable");
-            }
-            BitmapFactory.decodeStream(stream, null, bounds);
-        }
-
-        int longestEdge = Math.max(bounds.outWidth, bounds.outHeight);
-        int sampleSize = 1;
-        while (longestEdge / sampleSize > 3000) {
-            sampleSize *= 2;
-        }
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inSampleSize = sampleSize;
-        options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-        try (InputStream stream = getContentResolver().openInputStream(uri)) {
-            if (stream == null) {
-                throw new IOException("Image stream is unavailable");
-            }
-            Bitmap decoded = BitmapFactory.decodeStream(stream, null, options);
-            if (decoded == null) {
-                throw new IOException("Image could not be decoded");
-            }
-            int decodedLongestEdge = Math.max(decoded.getWidth(), decoded.getHeight());
-            if (decodedLongestEdge >= 2400) {
-                return decoded;
-            }
-            float scale = Math.min(2.2f, 2800f / decodedLongestEdge);
-            Bitmap enlarged = Bitmap.createScaledBitmap(
-                    decoded,
-                    Math.round(decoded.getWidth() * scale),
-                    Math.round(decoded.getHeight() * scale),
-                    true
-            );
-            if (enlarged != decoded) {
-                decoded.recycle();
-            }
-            return enlarged;
-        }
-    }
-
-    private void recognizeScheduleAtRotation(Bitmap bitmap, int attempt, String bestError) {
-        if (attempt >= SCHEDULE_OCR_ROTATIONS.length) {
-            bitmap.recycle();
-            finishScheduleImportWithError(bestError == null
-                    ? "Không đọc được lịch trong ảnh."
-                    : bestError);
-            return;
-        }
-
-        InputImage image = InputImage.fromBitmap(bitmap, SCHEDULE_OCR_ROTATIONS[attempt]);
-        scheduleTextRecognizer.process(image)
-                .addOnSuccessListener(text -> {
-                    List<ScheduleOcrParser.Token> scheduleTokens = createScheduleTokens(text);
-                    ScheduleOcrParser.Result result = ScheduleOcrParser.parse(
-                            scheduleTokens,
-                            pendingScheduleName,
-                            LocalDate.now()
-                    );
-                    if (result.success) {
-                        bitmap.recycle();
-                        setScheduleImportBusy(false);
-                        showSchedulePreview(result);
-                    } else {
-                        recognizeScheduleAtRotation(bitmap, attempt + 1, result.errorMessage);
-                    }
-                })
-                .addOnFailureListener(error -> recognizeScheduleAtRotation(
-                        bitmap,
-                        attempt + 1,
-                        bestError
-                ));
-    }
-
-    private List<ScheduleOcrParser.Token> createScheduleTokens(Text text) {
-        List<ScheduleOcrParser.Token> tokens = new ArrayList<>();
-        for (Text.TextBlock block : text.getTextBlocks()) {
-            for (Text.Line line : block.getLines()) {
-                for (Text.Element element : line.getElements()) {
-                    Rect bounds = element.getBoundingBox();
-                    if (bounds != null && !element.getText().trim().isEmpty()) {
-                        tokens.add(new ScheduleOcrParser.Token(
-                                element.getText(),
-                                bounds.left,
-                                bounds.top,
-                                bounds.right,
-                                bounds.bottom
-                        ));
-                    }
-                }
-            }
-        }
-        return tokens;
-    }
-
-    private void showSchedulePreview(ScheduleOcrParser.Result result) {
-        showScheduleEditor(
-                result.employeeName,
-                new ArrayList<>(result.shifts),
-                true
-        );
-    }
-
-    private void showManualScheduleNameDialog() {
-        TextInputLayout nameInputLayout = new TextInputLayout(this);
-        nameInputLayout.setHint("Họ và tên của bạn");
-        nameInputLayout.setBoxBackgroundMode(TextInputLayout.BOX_BACKGROUND_OUTLINE);
-
-        TextInputEditText nameInput = new TextInputEditText(nameInputLayout.getContext());
-        nameInput.setSingleLine(true);
-        nameInput.setText(pendingScheduleName);
-        nameInputLayout.addView(nameInput, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        ));
-
-        LinearLayout content = new LinearLayout(this);
-        content.setPadding(dp(20), dp(8), dp(20), 0);
-        content.addView(nameInputLayout);
-
-        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
-                .setTitle("Thêm lịch thủ công")
-                .setView(content)
-                .setNegativeButton("Hủy", null)
-                .setPositiveButton("Tiếp tục", null)
-                .create();
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                .setOnClickListener(v -> {
-                    String name = nameInput.getText() == null
-                            ? ""
-                            : nameInput.getText().toString().trim();
-                    if (name.isEmpty()) {
-                        nameInputLayout.setError("Hãy nhập họ và tên của bạn");
-                        return;
-                    }
-                    pendingScheduleName = name;
-                    dialog.dismiss();
-                    showScheduleShiftEditor(name, new ArrayList<>(), -1, false);
-                }));
-        showDialogWithBlur(dialog);
-    }
-
-    private void showScheduleEditor(
-            String employeeName,
-            List<WorkShift> editableShifts,
-            boolean importedFromImage
-    ) {
-        sortScheduleShifts(editableShifts);
-        String[] shiftLabels = new String[editableShifts.size()];
-        DateTimeFormatter dateFormat = DateTimeFormatter.ofPattern("EEE, dd/MM/yyyy", VIETNAM);
-        for (int index = 0; index < editableShifts.size(); index++) {
-            WorkShift shift = editableShifts.get(index);
-            shiftLabels[index] = capitalize(dateFormat.format(shift.date))
-                    + "  •  " + TIME_FORMAT.format(shift.start)
-                    + " – " + TIME_FORMAT.format(shift.end)
-                    + "\nChạm để sửa hoặc xóa";
-        }
-
-        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this)
-                .setTitle((importedFromImage ? "Kiểm tra lịch của " : "Sửa lịch của ") + employeeName)
-                .setNegativeButton(
-                        importedFromImage ? "Chọn ảnh khác" : "Đóng",
-                        (ignored, which) -> {
-                            if (importedFromImage) {
-                                scheduleImagePicker.launch(new String[]{"image/*"});
-                            }
-                        }
-                )
-                .setNeutralButton("Thêm ca", null)
-                .setPositiveButton("Lưu lịch", (ignored, which) -> {
-                    WorkScheduleManager.saveSchedule(this, employeeName, editableShifts);
-                    pendingScheduleName = employeeName;
-                    updateScheduleStatus();
-                    requestScheduleReminderPermissions();
-                    Toast.makeText(
-                            this,
-                            "Đã lưu " + editableShifts.size() + " ca của " + employeeName,
-                            Toast.LENGTH_LONG
-                    ).show();
-                });
-        if (shiftLabels.length == 0) {
-            builder.setMessage("Chưa có ca làm. Bấm “Thêm ca” để bổ sung ngày làm còn thiếu.");
-        } else {
-            builder.setItems(shiftLabels, (ignored, which) -> showScheduleShiftEditor(
-                    employeeName,
-                    editableShifts,
-                    which,
-                    importedFromImage
-            ));
-        }
-
-        AlertDialog dialog = builder.create();
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_NEUTRAL)
-                .setOnClickListener(v -> {
-                    dialog.dismiss();
-                    showScheduleShiftEditor(employeeName, editableShifts, -1, importedFromImage);
-                }));
-        showDialogWithBlur(dialog);
-    }
-
-    private void showScheduleShiftEditor(
-            String employeeName,
-            List<WorkShift> editableShifts,
-            int shiftIndex,
-            boolean importedFromImage
-    ) {
-        boolean editing = shiftIndex >= 0 && shiftIndex < editableShifts.size();
-        WorkShift existing = editing ? editableShifts.get(shiftIndex) : null;
-        ScheduleShiftDraft draft = new ScheduleShiftDraft(
-                existing == null ? suggestedScheduleDate(editableShifts) : existing.date,
-                existing == null ? LocalTime.of(8, 0) : existing.start,
-                existing == null ? LocalTime.of(17, 0) : existing.end
-        );
-
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(dp(6), dp(4), dp(6), dp(2));
-
-        Button dateButton = createDialogChoiceButton(formatCatchUpDate(draft.date));
-        Button startButton = createDialogChoiceButton(formatTime(draft.start));
-        Button endButton = createDialogChoiceButton(formatTime(draft.end));
-        form.addView(createDialogRow("Ngày làm", dateButton));
-        form.addView(createDialogRow("Giờ vào", startButton));
-        form.addView(createDialogRow("Giờ ra", endButton));
-
-        dateButton.setOnClickListener(v -> showScheduleDatePicker(draft, dateButton));
-        startButton.setOnClickListener(v -> showCatchUpTimePicker(
-                "Giờ vào",
-                draft.start,
-                selectedTime -> {
-                    draft.start = selectedTime;
-                    startButton.setText(formatTime(draft.start));
-                }
-        ));
-        endButton.setOnClickListener(v -> showCatchUpTimePicker(
-                "Giờ ra",
-                draft.end,
-                selectedTime -> {
-                    draft.end = selectedTime;
-                    endButton.setText(formatTime(draft.end));
-                }
-        ));
-
-        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this)
-                .setTitle(editing ? "Sửa ca làm" : "Thêm ca làm")
-                .setView(form)
-                .setNegativeButton("Quay lại", (ignored, which) ->
-                        showScheduleEditor(employeeName, editableShifts, importedFromImage))
-                .setPositiveButton("Lưu ca", null);
-        if (editing) {
-            builder.setNeutralButton("Xóa ca", (ignored, which) -> {
-                editableShifts.remove(shiftIndex);
-                showScheduleEditor(employeeName, editableShifts, importedFromImage);
-            });
-        }
-
-        AlertDialog dialog = builder.create();
-        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                .setOnClickListener(v -> {
-                    if (!draft.end.isAfter(draft.start)) {
-                        Toast.makeText(this, "Giờ ra phải sau giờ vào.", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    for (int index = 0; index < editableShifts.size(); index++) {
-                        if (index != shiftIndex && editableShifts.get(index).date.equals(draft.date)) {
-                            Toast.makeText(
-                                    this,
-                                    "Ngày này đã có ca làm. Hãy sửa ca đã có.",
-                                    Toast.LENGTH_SHORT
-                            ).show();
-                            return;
-                        }
-                    }
-
-                    WorkShift updated = new WorkShift(
-                            draft.date,
-                            normalizeTime(draft.start),
-                            normalizeTime(draft.end)
-                    );
-                    if (editing) {
-                        editableShifts.set(shiftIndex, updated);
-                    } else {
-                        editableShifts.add(updated);
-                    }
-                    sortScheduleShifts(editableShifts);
-                    dialog.dismiss();
-                    showScheduleEditor(employeeName, editableShifts, importedFromImage);
-                }));
-        showDialogWithBlur(dialog);
-    }
-
-    private void showScheduleDatePicker(ScheduleShiftDraft draft, Button dateButton) {
-        DatePickerDialog picker = new DatePickerDialog(
-                this,
-                (view, year, month, dayOfMonth) -> {
-                    draft.date = LocalDate.of(year, month + 1, dayOfMonth);
-                    dateButton.setText(formatCatchUpDate(draft.date));
-                },
-                draft.date.getYear(),
-                draft.date.getMonthValue() - 1,
-                draft.date.getDayOfMonth()
-        );
-        picker.show();
-    }
-
-    private LocalDate suggestedScheduleDate(List<WorkShift> shifts) {
-        if (shifts.isEmpty()) {
-            return LocalDate.now();
-        }
-        LocalDate latest = shifts.get(0).date;
-        for (WorkShift shift : shifts) {
-            if (shift.date.isAfter(latest)) {
-                latest = shift.date;
-            }
-        }
-        return latest.plusDays(1);
-    }
-
-    private void sortScheduleShifts(List<WorkShift> shifts) {
-        shifts.sort((first, second) -> {
-            int dateComparison = first.date.compareTo(second.date);
-            return dateComparison != 0 ? dateComparison : first.start.compareTo(second.start);
-        });
-    }
-
-    private void finishScheduleImportWithError(String message) {
-        setScheduleImportBusy(false);
-        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
-                .setTitle("Chưa lọc được lịch")
-                .setMessage(message + "\n\nHãy dùng ảnh rõ, không cắt mất tên hoặc hàng ngày tháng, rồi kiểm tra tên đã nhập đúng như trong ảnh.")
-                .setNegativeButton("Đóng", null)
-                .setPositiveButton("Thử lại", (ignored, which) -> showScheduleImageImportDialog())
-                .create();
-        showDialogWithBlur(dialog);
-    }
-
-    private void setScheduleImportBusy(boolean busy) {
-        scheduleImportInProgress = busy;
-        if (scheduleStatusText != null) {
-            if (busy) {
-                scheduleStatusText.setText("Đang đọc ảnh và tìm tên " + pendingScheduleName + "…");
-            } else {
-                updateScheduleStatus();
-            }
-        }
-        if (importScheduleButton != null) {
-            importScheduleButton.setEnabled(!busy && !promptShowing);
-        }
-    }
-
-    private void updateScheduleStatus() {
-        scheduleStatusText.setText(WorkScheduleManager.getStatusText(this));
-    }
-
-    private void requestScheduleReminderPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
-            return;
-        }
-        promptForExactAlarmPermission();
-    }
-
-    private void promptForExactAlarmPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S
-                || WorkScheduleManager.canScheduleExactReminders(this)) {
-            WorkScheduleManager.reschedule(this);
-            return;
-        }
-        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
-                .setTitle("Cho phép nhắc đúng giờ")
-                .setMessage("Hãy cho phép ứng dụng đặt báo thức chính xác để lời nhắc xuất hiện đúng 10 phút trước ca làm.")
-                .setNegativeButton("Để sau", null)
-                .setPositiveButton("Mở cài đặt", (ignored, which) -> {
-                    Intent settingsIntent = new Intent(
-                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
-                            Uri.parse("package:" + getPackageName())
-                    );
-                    startActivity(settingsIntent);
-                })
-                .create();
-        showDialogWithBlur(dialog);
     }
 
     private void showBackgroundOptions() {
@@ -892,7 +345,7 @@ public class MainActivity extends AppCompatActivity {
         TextView emptyView = new TextView(this);
         emptyView.setLayoutParams(new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(410)
+                dp(280)
         ));
         emptyView.setGravity(Gravity.CENTER);
         emptyView.setPadding(dp(24), dp(24), dp(24), dp(24));
@@ -1285,7 +738,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        CatchUpDraft draft = new CatchUpDraft(LocalDate.now().minusDays(1));
+        CatchUpDraft draft = new CatchUpDraft(LocalDate.now());
         applySummaryToCatchUpDraft(draft);
 
         LinearLayout form = new LinearLayout(this);
@@ -1373,7 +826,7 @@ public class MainActivity extends AppCompatActivity {
             Button checkInTimeButton,
             Button checkOutTimeButton
     ) {
-        LocalDate latestCatchUpDate = LocalDate.now().minusDays(1);
+        LocalDate latestCatchUpDate = LocalDate.now();
         DatePickerDialog picker = new DatePickerDialog(
                 this,
                 (view, year, month, dayOfMonth) -> {
@@ -1407,8 +860,8 @@ public class MainActivity extends AppCompatActivity {
 
     private boolean requestCatchUpAuthentication(CatchUpDraft draft) {
         LocalDate today = LocalDate.now();
-        if (!draft.date.isBefore(today)) {
-            Toast.makeText(this, "Chỉ có thể điểm danh bù cho ngày trước hôm nay.", Toast.LENGTH_SHORT).show();
+        if (draft.date.isAfter(today)) {
+            Toast.makeText(this, "Chỉ có thể điểm danh bù cho hôm nay hoặc ngày trước đó.", Toast.LENGTH_SHORT).show();
             return false;
         }
 
@@ -1474,7 +927,7 @@ public class MainActivity extends AppCompatActivity {
         content.addView(title);
 
         TextView description = new TextView(this);
-        description.setText("Chọn ngày, giờ vào và giờ ra. Bạn sẽ xác thực vân tay trước khi lưu.");
+        description.setText("Chọn hôm nay hoặc ngày trước đó, giờ vào và giờ ra. Bạn sẽ xác thực vân tay trước khi lưu.");
         description.setPadding(0, dp(4), 0, 0);
         description.setTextSize(12);
         description.setLineSpacing(0, 1.08f);
@@ -1585,7 +1038,6 @@ public class MainActivity extends AppCompatActivity {
         parkingMinusButton.setEnabled(!promptShowing);
         viewCalendarButton.setEnabled(!promptShowing);
         backgroundButton.setEnabled(!promptShowing);
-        importScheduleButton.setEnabled(!promptShowing && !scheduleImportInProgress);
         previousMonthButton.setEnabled(!promptShowing);
         nextMonthButton.setEnabled(!promptShowing && visibleMonth.isBefore(currentMonth));
 
@@ -1597,7 +1049,7 @@ public class MainActivity extends AppCompatActivity {
         LocalDate today = LocalDate.now();
         LocalDate lastVisibleDay = month.equals(YearMonth.from(today)) ? today : month.atEndOfMonth();
 
-        monthTitleText.setText("Tổng hợp tháng " + MONTH_FORMAT.format(month.atDay(1)));
+        monthTitleText.setText("Tháng " + MONTH_FORMAT.format(month.atDay(1)));
 
         currentMonthTotalMinutes = calculateMonthTotalMinutes(summaries);
         monthTotalText.setText("Tổng tháng: " + formatDuration(currentMonthTotalMinutes));
@@ -1634,10 +1086,10 @@ public class MainActivity extends AppCompatActivity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         );
-        rowParams.setMargins(0, dp(3), 0, dp(3));
+        rowParams.setMargins(0, dp(5), 0, dp(5));
         row.setLayoutParams(rowParams);
         row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setPadding(dp(14), dp(14), dp(14), dp(14));
         row.setBackgroundResource(R.drawable.bg_summary_row);
 
         LinearLayout titleRow = new LinearLayout(this);
@@ -1828,18 +1280,6 @@ public class MainActivity extends AppCompatActivity {
             this.date = date;
             this.checkInTime = LocalTime.of(8, 0);
             this.checkOutTime = LocalTime.of(17, 0);
-        }
-    }
-
-    private static final class ScheduleShiftDraft {
-        private LocalDate date;
-        private LocalTime start;
-        private LocalTime end;
-
-        private ScheduleShiftDraft(LocalDate date, LocalTime start, LocalTime end) {
-            this.date = date;
-            this.start = start;
-            this.end = end;
         }
     }
 

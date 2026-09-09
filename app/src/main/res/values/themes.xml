@@ -1,6 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Base.Theme.MyApplication" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.Attendance.Dialog</item>
         <item name="colorPrimary">@color/attendance_primary</item>
         <item name="colorOnPrimary">@color/attendance_on_primary</item>
         <item name="colorPrimaryContainer">@color/attendance_primary_container</item>
