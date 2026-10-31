@@ -118,6 +118,16 @@
                 </LinearLayout>
             </com.example.myapplication.GlassCardView>
 
+            <com.google.android.material.button.MaterialButton android:id="@+id/googleSheetsButton"
+                style="@style/Widget.Attendance.GlassButton"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_marginTop="16dp" android:text="@string/google_sheets" />
+            <TextView android:id="@+id/googleSheetsStatus"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:gravity="center" android:accessibilityLiveRegion="polite"
+                android:textAppearance="@style/TextAppearance.Attendance.Label"
+                android:text="@string/sheets_not_connected" />
+
             <com.example.myapplication.GlassCardView android:id="@+id/monthCard"
                 style="@style/Widget.Attendance.GlassCard"
                 android:layout_width="match_parent" android:layout_height="wrap_content"

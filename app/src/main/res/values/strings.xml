@@ -1,4 +1,6 @@
 <resources>
+    <string name="google_sheets">Google Sheets · Liên kết và đồng bộ</string>
+    <string name="sheets_not_connected">Chưa liên kết Google Sheets</string>
     <string name="app_name">Điểm danh vân tay</string>
     <string name="no_attendance_data">Chưa có dữ liệu chấm công trong tháng này</string>
     <string name="background_image">Ảnh nền</string>

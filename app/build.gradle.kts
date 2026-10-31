@@ -14,8 +14,8 @@ android {
         applicationId = "com.example.myapplication"
         minSdk = 30
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1.2"
+        versionCode = 4
+        versionName = "1.2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -40,8 +40,10 @@ dependencies {
     implementation(libs.material)
     implementation(libs.activity)
     implementation(libs.constraintlayout)
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("androidx.work:work-runtime:2.12.0")
+    implementation("com.google.android.gms:play-services-auth:22.0.0")
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
 }

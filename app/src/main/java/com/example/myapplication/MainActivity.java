@@ -131,6 +131,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         attendanceStore = new AttendanceStore(this);
+        googleSheetsConnection = new GoogleSheetsConnection(this, attendanceStore, savedInstanceState);
         bindViews();
         restoreBackgroundImage();
         confineDaySummaryScrolling();
@@ -170,6 +171,8 @@ public class MainActivity extends AppCompatActivity {
         // Bắt sự kiện bấm vào nút xem lịch
         viewCalendarButton.setOnClickListener(v -> showCalendarDialog());
         backgroundButton.setOnClickListener(v -> showBackgroundOptions());
+        findViewById(R.id.googleSheetsButton).setOnClickListener(v -> showGoogleSheetsDialog());
+        SheetsSync.schedule(this);
 
         previousMonthButton.setOnClickListener(v -> {
             visibleMonth = visibleMonth.minusMonths(1);
@@ -207,6 +210,39 @@ public class MainActivity extends AppCompatActivity {
                     .setInterpolator(new android.view.animation.DecelerateInterpolator())
                     .start();
         }
+    }
+
+    private final SharedPreferences.OnSharedPreferenceChangeListener sheetsListener =
+            (prefs, key) -> runOnUiThread(this::renderSheetsStatus);
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        SheetsSync.preferences(this).registerOnSharedPreferenceChangeListener(sheetsListener);
+        renderSheetsStatus();
+    }
+
+    @Override
+    protected void onStop() {
+        SheetsSync.preferences(this).unregisterOnSharedPreferenceChangeListener(sheetsListener);
+        super.onStop();
+    }
+
+    private void renderSheetsStatus() {
+        TextView status = findViewById(R.id.googleSheetsStatus);
+        status.setText(SheetsSync.status(this));
+    }
+
+    private GoogleSheetsConnection googleSheetsConnection;
+
+    private void showGoogleSheetsDialog() {
+        googleSheetsConnection.show();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle state) {
+        googleSheetsConnection.save(state);
+        super.onSaveInstanceState(state);
     }
 
     private void bindViews() {
@@ -682,6 +718,7 @@ public class MainActivity extends AppCompatActivity {
                 () -> {
                     LocalDateTime now = LocalDateTime.now();
                     attendanceStore.insert(action, now);
+                    SheetsSync.changed(this);
                     Toast.makeText(
                             MainActivity.this,
                             "Đã ghi nhận " + action.displayName.toLowerCase(VIETNAM) + " lúc " + formatTime(now),
@@ -877,6 +914,7 @@ public class MainActivity extends AppCompatActivity {
                 "Lưu ngày " + formatCatchUpDate(draft.date),
                 () -> {
                     attendanceStore.replaceDayWithPair(draft.date, checkIn, checkOut);
+                    SheetsSync.changed(this);
                     visibleMonth = YearMonth.from(draft.date);
                     Toast.makeText(
                             MainActivity.this,
@@ -1283,7 +1321,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private enum PunchAction {
+    enum PunchAction {
         IN("IN", "Vào làm"),
         OUT("OUT", "Ra làm");
 
@@ -1328,16 +1366,16 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private static final class AttendanceStore extends SQLiteOpenHelper {
+    static final class AttendanceStore extends SQLiteOpenHelper {
         private static final String DATABASE_NAME = "attendance.db";
-        private static final int DATABASE_VERSION = 1;
+        private static final int DATABASE_VERSION = 2;
         private static final String TABLE_EVENTS = "attendance_events";
         private static final String COLUMN_ID = "id";
         private static final String COLUMN_ACTION = "action";
         private static final String COLUMN_TIMESTAMP = "timestamp";
         private static final String COLUMN_WORK_DATE = "work_date";
 
-        private AttendanceStore(Context context) {
+        AttendanceStore(Context context) {
             super(context, DATABASE_NAME, null, DATABASE_VERSION);
         }
 
@@ -1349,25 +1387,83 @@ public class MainActivity extends AppCompatActivity {
                     + COLUMN_TIMESTAMP + " TEXT NOT NULL, "
                     + COLUMN_WORK_DATE + " TEXT NOT NULL)");
             db.execSQL("CREATE INDEX idx_attendance_work_date ON " + TABLE_EVENTS + " (" + COLUMN_WORK_DATE + ")");
+            createSyncTable(db);
         }
 
         @Override
         public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-            db.execSQL("DROP TABLE IF EXISTS " + TABLE_EVENTS);
-            onCreate(db);
+            if (oldVersion < 2) {
+                createSyncTable(db);
+                db.execSQL("INSERT OR IGNORE INTO sheets_sync(month, revision, synced_revision) "
+                        + "SELECT DISTINCT substr(work_date, 1, 7), 1, 0 FROM attendance_events");
+            }
         }
 
-        private void insert(PunchAction action, LocalDateTime timestamp) {
-            insert(getWritableDatabase(), action, timestamp);
+        private static void createSyncTable(SQLiteDatabase db) {
+            db.execSQL("CREATE TABLE sheets_sync (month TEXT PRIMARY KEY, "
+                    + "revision INTEGER NOT NULL, synced_revision INTEGER NOT NULL DEFAULT 0)");
         }
 
-        private void replaceDayWithPair(LocalDate date, LocalDateTime checkIn, LocalDateTime checkOut) {
+        private static void markMonthChanged(SQLiteDatabase db, LocalDate date) {
+            String month = YearMonth.from(date).toString();
+            db.execSQL("INSERT OR IGNORE INTO sheets_sync(month, revision) VALUES (?, 0)", new Object[]{month});
+            db.execSQL("UPDATE sheets_sync SET revision = revision + 1 WHERE month = ?", new Object[]{month});
+        }
+
+        void markAllForSync() {
+            getWritableDatabase().execSQL("UPDATE sheets_sync SET revision = revision + 1, synced_revision = 0");
+        }
+
+        org.json.JSONObject nextSheetsPayload() throws org.json.JSONException {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try (Cursor cursor = db.rawQuery("SELECT month, revision FROM sheets_sync "
+                    + "WHERE revision > synced_revision ORDER BY month LIMIT 1", null)) {
+                if (!cursor.moveToFirst()) return null;
+                String month = cursor.getString(0);
+                org.json.JSONArray days = new org.json.JSONArray();
+                for (DailySummary day : getSummariesForMonth(YearMonth.parse(month)).values()) {
+                    org.json.JSONObject row = new org.json.JSONObject();
+                    row.put("date", day.date.toString());
+                    row.put("checkIn", day.firstIn == null ? "" : TIME_FORMAT.format(day.firstIn));
+                    row.put("checkOut", day.lastOut == null ? "" : TIME_FORMAT.format(day.lastOut));
+                    row.put("workedMinutes", day.workedMinutes);
+                    row.put("standardMinutes", AttendanceCalculator.standardWorkMinutes(day.workedMinutes));
+                    row.put("overtimeMinutes", AttendanceCalculator.overtimeMinutes(day.workedMinutes));
+                    days.put(row);
+                }
+                return new org.json.JSONObject().put("month", month)
+                        .put("revision", cursor.getLong(1)).put("days", days);
+            } finally {
+                db.endTransaction();
+            }
+        }
+
+        void acknowledgeSheets(String month, long revision) {
+            getWritableDatabase().execSQL("UPDATE sheets_sync SET synced_revision = MAX(synced_revision, ?) "
+                    + "WHERE month = ?", new Object[]{revision, month});
+        }
+
+        void insert(PunchAction action, LocalDateTime timestamp) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                insert(db, action, timestamp);
+                markMonthChanged(db, timestamp.toLocalDate());
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+        }
+
+        void replaceDayWithPair(LocalDate date, LocalDateTime checkIn, LocalDateTime checkOut) {
             SQLiteDatabase db = getWritableDatabase();
             db.beginTransaction();
             try {
                 db.delete(TABLE_EVENTS, COLUMN_WORK_DATE + " = ?", new String[]{date.toString()});
                 insert(db, PunchAction.IN, checkIn);
                 insert(db, PunchAction.OUT, checkOut);
+                markMonthChanged(db, date);
                 db.setTransactionSuccessful();
             } finally {
                 db.endTransaction();
@@ -1379,7 +1475,7 @@ public class MainActivity extends AppCompatActivity {
             values.put(COLUMN_ACTION, action.storageValue);
             values.put(COLUMN_TIMESTAMP, STORAGE_TIME_FORMAT.format(timestamp));
             values.put(COLUMN_WORK_DATE, timestamp.toLocalDate().toString());
-            db.insert(TABLE_EVENTS, null, values);
+            db.insertOrThrow(TABLE_EVENTS, null, values);
         }
 
         private DailySummary getSummaryForDate(LocalDate date) {
